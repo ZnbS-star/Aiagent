@@ -5,7 +5,8 @@ from backend_app.models import (
     AssessmentInput, AssessmentOutput,
     StudentAssessmentInput, StudentAssessmentEvaluationOutput,
     PracticeQuestionsInput, PracticeQuestionsOutput,
-    PracticeFeedbackInput, PracticeFeedbackOutput, # Added
+    PracticeFeedbackInput, PracticeFeedbackOutput,
+    NaturalLanguageQueryInput, NLQueryResponse, # Added for NLP endpoint
     Message 
 )
 from backend_app.services import (
@@ -14,8 +15,9 @@ from backend_app.services import (
     generate_assessment_service,
     evaluate_student_assessment_answers_service,
     generate_practice_questions_service,
-    get_practice_feedback_service # Added
+    get_practice_feedback_service
 )
+from backend_app.nlp_handler import process_natural_language_query # Added for NLP endpoint
 from typing import Union, List, Optional
 import os
 import sys 
@@ -390,4 +392,175 @@ async def evaluate_student_answers(input_data: StudentAssessmentInput = Body(...
     except Exception as e:
         print(f"API ERROR: An unexpected error occurred in /student-assessments/evaluate-answers/ endpoint: {e}")
         # Log the full error e for server-side debugging
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+# --- Practice Question Endpoints ---
+
+@router.post(
+    "/practice-questions/generate/",
+    response_model=PracticeQuestionsOutput,
+    summary="Generate Practice Questions",
+    description="Generates practice questions based on topic, preferences, and student history (if available via student_id).",
+    responses={
+        200: {"description": "Practice questions generated successfully."},
+        400: {"model": Message, "description": "Bad Request (e.g., missing required fields)"},
+        500: {"model": Message, "description": "Internal Server Error / LLM or RAG failure"}
+    }
+)
+async def generate_practice_questions_endpoint(input_data: PracticeQuestionsInput = Body(..., examples={
+    "topic_only": {
+        "summary": "Generate by topic",
+        "description": "Generate questions for a specific topic without student history.",
+        "value": {
+            "practice_topic": "Python list comprehensions",
+            "question_preferences": {"multiple-choice": 2, "short-answer": 1}
+        }
+    },
+    "topic_with_student": {
+        "summary": "Generate by topic for a student",
+        "description": "Generate questions for a topic, considering student's history.",
+        "value": {
+            "student_id": 123,
+            "practice_topic": "Calculus derivatives",
+            "question_preferences": {"short-answer": 3}
+        }
+    },
+    "no_prefs_with_student": {
+        "summary": "Generate general questions for a student on a topic",
+        "description": "Generate questions for a topic, considering student's history, with default preferences.",
+        "value": {
+            "student_id": 123,
+            "practice_topic": "Photosynthesis"
+        }
+    }
+})):
+    """
+    Endpoint to generate practice questions.
+    - Requires `practice_topic`.
+    - `student_id` is optional for personalized question generation.
+    - `question_preferences` (types and counts) are optional.
+    """
+    if not input_data.practice_topic or not input_data.practice_topic.strip():
+        raise HTTPException(status_code=400, detail="Practice topic cannot be empty.")
+
+    try:
+        result = await generate_practice_questions_service(input_data)
+        # PracticeQuestionsOutput is designed to carry an error message if one occurs during generation.
+        # So, we return the result directly, and the client can check for `error_message`.
+        # If result.error_message and a specific HTTP status code were desired here based on error type:
+        # if result.error_message:
+        #     raise HTTPException(status_code=500, detail=result.error_message) # Or 400 if client error
+        return result
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        # Log the exception e for server-side debugging
+        print(f"API ERROR: An unexpected error occurred in /practice-questions/generate/ endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+@router.post(
+    "/practice-questions/feedback/",
+    response_model=PracticeFeedbackOutput,
+    summary="Get Feedback on Practice Answer",
+    description="Submits a student's answer to a practice question and gets LLM-generated feedback.",
+    responses={
+        200: {"description": "Feedback provided successfully."},
+        400: {"model": Message, "description": "Bad Request (e.g., missing required fields)"},
+        500: {"model": Message, "description": "Internal Server Error / LLM failure"}
+    }
+)
+async def get_practice_feedback_endpoint(input_data: PracticeFeedbackInput = Body(..., examples={
+    "correct_answer_feedback": {
+        "summary": "Feedback for a correct answer",
+        "value": {
+            "student_id": 123,
+            "practice_question_catalog_id": 10, # Assuming this question exists
+            "question_text": "What is 2 + 2?",
+            "model_answer_text": "4",
+            "student_answer_text": "4",
+            "question_type": "Short-Answer"
+        }
+    },
+    "incorrect_answer_feedback": {
+        "summary": "Feedback for an incorrect answer",
+        "value": {
+            "student_id": 124,
+            "practice_question_catalog_id": 11,
+            "question_text": "What is the main purpose of a variable in programming?",
+            "model_answer_text": "To store and manage data that can change.",
+            "student_answer_text": "To make the code longer.",
+            "question_type": "Short-Answer"
+        }
+    }
+})):
+    """
+    Endpoint to get feedback on a student's answer to a practice question.
+    - Requires `student_id`, `practice_question_catalog_id`, `question_text`,
+      `model_answer_text`, `student_answer_text`, and `question_type`.
+    """
+    if not all([input_data.student_id,
+                input_data.practice_question_catalog_id,
+                input_data.question_text,
+                input_data.model_answer_text,
+                # student_answer_text can be empty, so not checking strip here explicitly
+                input_data.question_type]):
+        raise HTTPException(status_code=400, detail="Missing one or more required fields: student_id, practice_question_catalog_id, question_text, model_answer_text, question_type.")
+
+    try:
+        result = await get_practice_feedback_service(input_data)
+        # PracticeFeedbackOutput is designed to carry an error message if one occurs.
+        # Return the result directly.
+        # if result.error_message:
+        #     raise HTTPException(status_code=500, detail=result.error_message)
+        return result
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        # Log the exception e for server-side debugging
+        print(f"API ERROR: An unexpected error occurred in /practice-questions/feedback/ endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+# --- NLP Unified Query Endpoint ---
+
+@router.post(
+    "/natural-query/",
+    response_model=NLQueryResponse,
+    summary="Process a natural language query to trigger various backend services.",
+    description="Accepts a user's query in natural language, attempts to understand the intent "
+                "and extract relevant entities, then routes to the appropriate backend service. "
+                "The response will vary based on the processed query. "
+                "The `service_response` field in the output will contain the actual response from the "
+                "triggered service (e.g., practice questions, a teaching plan, etc.) if the query is "
+                "successfully mapped and processed by a downstream service. Check the `status` and `detected_intent` "
+                "fields to understand how the query was processed.",
+    responses={
+        200: {"description": "Query processed. Check 'status', 'detected_intent', and 'service_response' fields for details."},
+        400: {"model": Message, "description": "Bad Request (e.g., empty query)"},
+        500: {"model": Message, "description": "Internal Server Error / NLP processing error"}
+    }
+)
+async def natural_language_query_endpoint(input_data: NaturalLanguageQueryInput = Body(..., examples={
+    "practice_question_request": {
+        "summary": "Request practice questions",
+        "value": {"query": "I want to practice python dictionaries for student 123"}
+    },
+    "teaching_plan_request": {
+        "summary": "Request teaching plan",
+        "value": {"query": "Generate a teaching plan for Dr. Smith about World War 2 for high schoolers"}
+    },
+    "student_qa_request": {
+        "summary": "Ask a question",
+        "value": {"query": "What is mitosis?"}
+    }
+})):
+    if not input_data.query or not input_data.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    try:
+        result = await process_natural_language_query(input_data)
+        return result
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        # Log e
+        print(f"API ERROR: Unexpected error in /natural-query/: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")

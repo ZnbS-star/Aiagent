@@ -46,14 +46,13 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # These are not directly used by this script but are part of the project's common setup.
-    # Setting them to fallbacks if not present, to avoid potential issues if database_utils
-    # or other imported modules had indirect dependencies (though unlikely for these specific DB functions).
+    # Ensuring environment is consistent for any underlying library expectations.
+    # It's expected that DASHSCOPE_API_KEY and ZHIPUAI_API_KEY are set in the environment
+    # if any imported modules or future functionalities require them.
     if "DASHSCOPE_API_KEY" not in os.environ:
-        os.environ["DASHSCOPE_API_KEY"] = "sk-36c2e0675a6d4d1b9a528c4b79f9f400" 
-        print("Warning: DASHSCOPE_API_KEY not found. Using placeholder if needed by imports.")
+        print("Warning: DASHSCOPE_API_KEY not found in environment. This might be an issue if needed by imports.")
     if "ZHIPUAI_API_KEY" not in os.environ:
-        os.environ["ZHIPUAI_API_KEY"] = "3573c5d116ae476eac14e7c61faffaab.LYbGSlVQ3qRNDcfR"
-        print("Warning: ZHIPUAI_API_KEY not found. Using placeholder if needed by imports.")
+        print("Warning: ZHIPUAI_API_KEY not found in environment. This might be an issue if needed by imports.")
 
     print("--- Assessment Performance Analyzer ---")
     db_conn = None

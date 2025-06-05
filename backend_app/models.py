@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 
 class StudentQuestionInput(BaseModel):
     question: str = Field(..., example="Explain the concept of photosynthesis.")
@@ -105,6 +105,28 @@ class PracticeFeedbackOutput(BaseModel):
     correctness_assessment: str
     detailed_feedback: str
     error_message: Optional[str] = None
+
+# --- NLP Unified Query Models ---
+class NaturalLanguageQueryInput(BaseModel):
+    query: str = Field(..., example="I want to practice Python lists for my student named Alice.")
+    # Potentially add user_id or session_id if needed for context later
+
+class NLQueryResponse(BaseModel):
+    status: str = Field(..., example="Success/Failure/ClarificationNeeded")
+    message: Optional[str] = Field(None, example="Request processed.")
+    original_query: str
+    detected_intent: Optional[str] = None
+    extracted_entities: Optional[Dict[str, str]] = None # Changed from Dict[str, Any] to Dict[str, str] as per instruction example
+    service_response: Optional[Union[
+        PracticeQuestionsOutput,
+        TeachingPlanOutput,
+        StudentQuestionOutput,
+        AssessmentOutput,
+        List[StudentAssessmentEvaluationOutput], # This one is a List
+        PracticeFeedbackOutput
+        # Add other relevant SINGLE output models here, not List[Model] unless the service returns a list for a single query
+    ]] = None
+
 
 # Generic message model for simple status updates or errors not fitting other models
 class Message(BaseModel):

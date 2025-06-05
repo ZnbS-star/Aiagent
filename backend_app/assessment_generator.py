@@ -1,7 +1,7 @@
 import sys
 import os # Ensure os is imported
-os.environ["ZHIPUAI_API_KEY"] = "3573c5d116ae476eac14e7c61faffaab.LYbGSlVQ3qRNDcfR"
-os.environ["DASHSCOPE_API_KEY"] ="sk-36c2e0675a6d4d1b9a528c4b79f9f400"
+# API keys ZHIPUAI_API_KEY and DASHSCOPE_API_KEY should be set in the environment.
+# Client libraries (ChatTongyi, ZhipuAIEmbeddings) are expected to pick them up.
 MYSQL_DB_NAME = "Aiagent"
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_core.prompts import ChatPromptTemplate

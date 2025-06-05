@@ -1,9 +1,5 @@
 import sys # For potential sys.exit()
 import os # For environment variables
-import sys # For potential sys.exit()
-import os # For environment variables
-os.environ["ZHIPUAI_API_KEY"] = "3573c5d116ae476eac14e7c61faffaab.LYbGSlVQ3qRNDcfR"
-os.environ["DASHSCOPE_API_KEY"] ="sk-36c2e0675a6d4d1b9a528c4b79f9f400"
 import mysql.connector # For mysql.connector.Error
 from langchain_community.chat_models import ChatZhipuAI # For LLM evaluation
 from langchain_core.prompts import ChatPromptTemplate
@@ -263,16 +259,16 @@ def get_llm_evaluation_for_answer(system_prompt, human_prompt, llm_api_key):
     Args:
         system_prompt (str): The system message for the LLM evaluator.
         human_prompt (str): The human message containing assessment, question, and student answer.
-        llm_api_key (str): API key for the LLM (e.g., ZHIPUAI_API_KEY).
 
     Returns:
         str: The LLM's raw evaluation string, or None if an error occurs.
     """
     try:
         # Using ChatZhipuAI for evaluation. Temperature might be lower for more deterministic eval.
-        llm = ChatZhipuAI(api_key=llm_api_key, temperature=0.4) 
+        # Assuming ChatZhipuAI defaults to reading ZHIPUAI_API_KEY from environment if api_key is not provided.
+        llm = ChatZhipuAI(temperature=0.4)
     except Exception as e:
-        print(f"Error initializing LLM (ChatZhipuAI) for evaluation. Details: {e}")
+        print(f"Error initializing LLM (ChatZhipuAI) for evaluation. Ensure ZHIPUAI_API_KEY is set in environment. Details: {e}")
         return None
 
     prompt_template = ChatPromptTemplate.from_messages([
@@ -372,12 +368,14 @@ def parse_llm_evaluation(llm_evaluation_str):
 if __name__ == '__main__':
     print("--- Student Assessment Evaluation Tool ---")
 
-    # API Key Setup for ZhipuAI (for both embeddings and LLM evaluation)
-    ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY")
-    if ZHIPUAI_API_KEY is None:
-        ZHIPUAI_API_KEY = "3573c5d116ae476eac14e7c61faffaab.LYbGSlVQ3qRNDcfR" # Fallback key
-        print("Warning: ZHIPUAI_API_KEY not found. Using hardcoded key for embeddings and LLM.")
-        os.environ["ZHIPUAI_API_KEY"] = ZHIPUAI_API_KEY # Set for this session
+    # API Key Setup: Ensure ZHIPUAI_API_KEY is set in the environment.
+    # ChatZhipuAI and ZhipuAIEmbeddings are expected to pick it up automatically.
+    if not os.environ.get("ZHIPUAI_API_KEY"):
+        print("Critical Error: ZHIPUAI_API_KEY not found in environment. This key is required for LLM evaluation and RAG embeddings. Please set it and retry.")
+        sys.exit(1)
+    # Ensure DASHSCOPE_API_KEY is also checked if any DashScope clients were to be used. For now, only ZhipuAI is used.
+    if not os.environ.get("DASHSCOPE_API_KEY"):
+        print("Warning: DASHSCOPE_API_KEY not found in environment. This might be an issue if other LLM providers are used elsewhere or in future.")
 
     # MySQL Database connection details
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
@@ -457,10 +455,11 @@ if __name__ == '__main__':
                 rag_context_snippets=rag_grading_snippets # Pass RAG snippets
             )
             
+            # ZHIPUAI_API_KEY is no longer passed as an argument.
+            # get_llm_evaluation_for_answer will use the environment variable.
             raw_llm_evaluation = get_llm_evaluation_for_answer(
                 eval_prompt_components["system_message"],
-                eval_prompt_components["human_message"],
-                ZHIPUAI_API_KEY
+                eval_prompt_components["human_message"]
             )
 
             parsed_evaluation = parse_llm_evaluation(raw_llm_evaluation)
