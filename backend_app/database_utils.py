@@ -228,7 +228,7 @@ def save_teaching_plan(db_conn,title, content, teacher_id=None):
         return False
     
     cursor = db_conn.cursor()
-    sql = "INSERT INTO teaching_plans (teacher_id, subject, title, content) VALUES (%s, %s, %s, %s)"
+    sql = "INSERT INTO teaching_plans (teacher_id, title, content) VALUES (%s, %s, %s)"
     val = (teacher_id,title, content)
     try:
         cursor.execute(sql, val)

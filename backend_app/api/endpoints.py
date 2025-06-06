@@ -111,29 +111,19 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput = Body(..
         "value": {"query": "Create a teaching plan for Mr. Harrison on the American Revolution, suitable for 11th graders. It should include key battles, major figures, and the Declaration of Independence. Please provide a week-by-week breakdown and suggest some project ideas. Title it 'American Revolution Comprehensive'."}
     }
 })):
-    """
-    Endpoint to generate an initial teaching plan from a natural language query.
-    - Processes the `query` using NLP to extract subject, outline, teacher name, style, etc.
-    - `teacher_id` can be optionally provided in the input if known (e.g., from user session).
-    - The extracted information is then used to generate the teaching plan content.
-    - The plan is saved to the database, associated with the teacher (either by `teacher_id` or by creating/finding teacher by `teacher_name` extracted from query).
-    """
     if not input_data.query or not input_data.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     TEACHING_PLAN_SYSTEM_PROMPT = """
-You are an AI assistant. Your task is to extract specific information from a user's query to help generate a teaching plan.
-Output these entities as a JSON object.
+你是一个 AI 助手。你的任务是从用户的查询中提取特定信息，以帮助生成教案。
+从核心请求中提取以下实体：
 
-**Important Instruction on Query Format:** The user's query might sometimes start with a phrase like "Teaching objectives:", "Note:", "User asks:", or similar instructional prefixes. You should IGNORE such prefixes and extract the information from the core request that follows. For example, if the query is "Teaching objectives: Create a math plan on algebra", you should process "Create a math plan on algebra".
-
-Extract the following entities from the core request:
-- "teaching_outline" (string, required): The specific topics, units, or key areas to be covered within that subject. If the query only states the subject for the plan without detailing specific topics, this outline can be the same as the subject. (e.g., "Core concepts, installation, basic examples", "TensorFlow Programming", "Cell structure, genetics, evolution").
-- "style_tone" (string, optional): Specific style or tone for the plan (e.g., "inquiry-based", "formal", "project-based").
-- "output_structure" (string, optional): Desired structure for the output (e.g., "week-by-week breakdown", "include project ideas").
-- "title_for_db" (string, optional): A specific title for saving the plan.
-如果没有style_tone,output_structure,title_for_db,可以根据teaching_outline生成
-Output MUST be a JSON object.
+"teaching_outline"（字符串，必填）：在该学科内要涵盖的具体主题、单元或关键领域。
+"style_tone"（字符串，可选）：教案的特定风格或语气（例如："探究式"、"正式"、"项目式"）。
+"output_structure"（字符串，可选）：所需的输出结构（例如："包括知识讲解、实训练习与指导、时间分布等"）。
+"title_for_db"（字符串，可选）：用于保存教案的特定标题。
+如果没有 style_tone、output_structure、title_for_db，可以根据 teaching_outline 生成
+输出必须是一个 JSON 对象。
 """
     parsed_entities_dict = await parse_query_with_llm(input_data.query, TEACHING_PLAN_SYSTEM_PROMPT)
 
@@ -148,9 +138,6 @@ Output MUST be a JSON object.
     print(style_tone)
     print(output_structure)
     print(title_for_db)
-    # Validate required entities from NLP
-    # Determine teacher information
-    # Priority: input_data.teacher_id > nlp_teacher_name
     final_teacher_id = input_data.teacher_id
 
     db_conn = None

@@ -156,10 +156,6 @@ async def generate_initial_teaching_plan_service(
     output_structure:str
     # LLM and Embeddings will be initialized inside, using env vars for keys
 ) -> tuple[str , List[str] ]: # Returns (plan_content, rag_snippets_used) or (None, None)
-    """
-    Generates an initial teaching plan based on inputs, using RAG and an LLM.
-    This is a single-shot generation without interactive refinement.
-    """
     zhipuai_api_key = _get_zhipuai_api_key() # Uses the existing helper
     # A. RAG Search Logic
     retrieved_rag_snippets = []
@@ -181,20 +177,16 @@ async def generate_initial_teaching_plan_service(
                 print("SERVICE: No relevant snippets found from RAG.")
     except Exception as e:
         print(f"SERVICE ERROR during RAG search: {e}. Proceeding without RAG context.")
-        # Fall through to generate plan without RAG if RAG fails
 
-    # B. Prepare Prompt Components (Simplified local version)
     system_message = (
-        f"You are an experienced 教师, Your task is to create a detailed "
-        "first draft of a teaching plan based on the provided outline and supplementary materials. "
-        "Focus on clarity, accuracy, and comprehensive coverage of the key points."
+        f"你是一位经验丰富的教师，你的任务是根据提供的大纲和补充材料，撰写一份详细的教案初稿。需注重内容的清晰性、准确性，并全面覆盖要点。最后输出语言是中文"
     )
     
     human_message_parts = [
-        f"The initial outline provided by the teacher is:\n{initial_outline}\n"
+        f"教师提供的初始大纲是:\n{initial_outline}\n"
     ]
     if retrieved_rag_snippets:
-        human_message_parts.append("Consider the following relevant excerpts from source materials for additional context or detail:")
+        human_message_parts.append("考虑以下来自源材料的相关摘录，以获取更多背景或细节:")
         for i, snippet in enumerate(retrieved_rag_snippets):
             human_message_parts.append(f"--- Snippet {i+1} ---\n{snippet}\n--- End Snippet {i+1} ---")
     else:
