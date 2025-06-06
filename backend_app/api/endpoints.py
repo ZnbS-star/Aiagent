@@ -6,13 +6,14 @@ from backend_app.models import (
     StudentAssessmentInput, StudentAssessmentNLInput, StudentAssessmentEvaluationOutput, StudentAssessmentAnswerItem, # Added StudentAssessmentNLInput and StudentAssessmentAnswerItem
     PracticeQuestionsInput, PracticeQuestionNLInput, PracticeQuestionsOutput, 
     PracticeFeedbackInput, PracticeFeedbackNLInput, PracticeFeedbackOutput, 
-    Message 
+    Message, StudentPerformanceDetail # Added StudentPerformanceDetail
 )
 from backend_app.services import (
     process_student_question_service, 
     generate_initial_teaching_plan_service,
     generate_assessment_service,
     evaluate_student_assessment_answers_service,
+    get_student_assessment_performance_service, # Added new service
     generate_practice_questions_service,
     get_practice_feedback_service
 )
@@ -121,54 +122,41 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput = Body(..
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     TEACHING_PLAN_SYSTEM_PROMPT = """
-You are an AI assistant that extracts detailed parameters for generating a teaching plan from a user's query.
-The user wants to generate a teaching plan. Extract the following entities:
-- "subject" (string, required): The subject of the teaching plan (e.g., "High School Biology", "AP Physics 1").
-- "teaching_outline" (string, required): The core topics, units, or outline for the plan (e.g., "Unit 1: Cells, Unit 2: Genetics", "Kinematics, Dynamics, Energy").
-- "teacher_name" (string, optional): The name of the teacher for whom the plan is being created (e.g., "Dr. Smith", "Prof. Curie").
-- "style_tone" (string, optional): Specific style or tone for the plan (e.g., "Inquiry-based and hands-on", "Formal and detailed").
-- "output_structure" (string, optional): Desired structure for the output (e.g., "Include weekly breakdown and assessment ideas").
-- "title_for_db" (string, optional): A specific title for saving the plan in a database.
+You are an AI assistant. Your task is to extract specific information from a user's query to help generate a teaching plan.
+Output these entities as a JSON object.
 
-If the query is missing essential information like "subject" or "teaching_outline", clearly state that in the "error" field of your JSON response and list what's missing.
-If the query is too vague for any meaningful extraction, return an error.
+**Important Instruction on Query Format:** The user's query might sometimes start with a phrase like "Teaching objectives:", "Note:", "User asks:", or similar instructional prefixes. You should IGNORE such prefixes and extract the information from the core request that follows. For example, if the query is "Teaching objectives: Create a math plan on algebra", you should process "Create a math plan on algebra".
+
+Extract the following entities from the core request:
+- "teaching_outline" (string, required): The specific topics, units, or key areas to be covered within that subject. If the query only states the subject for the plan without detailing specific topics, this outline can be the same as the subject. (e.g., "Core concepts, installation, basic examples", "TensorFlow Programming", "Cell structure, genetics, evolution").
+- "style_tone" (string, optional): Specific style or tone for the plan (e.g., "inquiry-based", "formal", "project-based").
+- "output_structure" (string, optional): Desired structure for the output (e.g., "week-by-week breakdown", "include project ideas").
+- "title_for_db" (string, optional): A specific title for saving the plan.
+如果没有style_tone,output_structure,title_for_db,可以根据teaching_outline生成
 Output MUST be a JSON object.
 """
     parsed_entities_dict = await parse_query_with_llm(input_data.query, TEACHING_PLAN_SYSTEM_PROMPT)
 
     if "error" in parsed_entities_dict:
         raise HTTPException(status_code=400, detail=f"NLP processing error: {parsed_entities_dict['error']} - Details: {parsed_entities_dict.get('details', 'N/A')}")
-
     # Extract entities from NLP response
-    subject = parsed_entities_dict.get("subject")
     teaching_outline = parsed_entities_dict.get("teaching_outline")
-    nlp_teacher_name = parsed_entities_dict.get("teacher_name")
     style_tone = parsed_entities_dict.get("style_tone")
     output_structure = parsed_entities_dict.get("output_structure")
     title_for_db = parsed_entities_dict.get("title_for_db")
-
+    print(teaching_outline)
+    print(style_tone)
+    print(output_structure)
+    print(title_for_db)
     # Validate required entities from NLP
-    if not subject or not teaching_outline:
-        missing = []
-        if not subject: missing.append("subject")
-        if not teaching_outline: missing.append("teaching_outline")
-        raise HTTPException(status_code=400, detail=f"NLP could not extract required information from query: {', '.join(missing)} missing.")
-
     # Determine teacher information
     # Priority: input_data.teacher_id > nlp_teacher_name
     final_teacher_id = input_data.teacher_id
-    effective_teacher_name = nlp_teacher_name # Used for service call and DB title if no ID
 
-    if not final_teacher_id and not nlp_teacher_name:
-        print("Warning: Neither teacher_id provided in input nor teacher_name extracted by NLP. Plan will be saved without teacher association or with a generic name if DB allows.")
-        effective_teacher_name = "Unknown Teacher" # Default for service call if no name
-    
     db_conn = None
     try:
         # Call the existing service function with extracted parameters
-        generated_content, rag_snippets_used = await generate_initial_teaching_plan_service(
-            teacher_name=effective_teacher_name, # Service expects a name
-            subject=subject,
+        generated_content, _ = await generate_initial_teaching_plan_service(
             initial_outline=teaching_outline,
             style_tone=style_tone,
             output_structure=output_structure
@@ -179,7 +167,7 @@ Output MUST be a JSON object.
             raise HTTPException(status_code=500, detail="Failed to generate teaching plan content from LLM service. Check service logs.")
 
         # Determine title for saving (use NLP extracted, then input_data's query as basis, or default)
-        title_to_save = title_for_db if title_for_db else f"Plan for {subject} by {effective_teacher_name or 'System'}"
+        title_to_save = title_for_db 
         
         # Database operations
         MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
@@ -188,7 +176,6 @@ Output MUST be a JSON object.
             # Return the generated content without saving if DB is not configured
             return TeachingPlanOutput(
                 title=title_to_save, 
-                subject=input_data.subject,
                 generated_plan_content=generated_content,
                 error_message="Plan generated but not saved; MYSQL_DB not configured."
             )
@@ -199,26 +186,14 @@ Output MUST be a JSON object.
             # Return generated content but indicate save failure
             return TeachingPlanOutput(
                 title=title_to_save,
-                subject=input_data.subject,
                 generated_plan_content=generated_content,
                 error_message="Plan generated but failed to connect to DB for saving."
             )
 
-        # Get/Create teacher_id if not provided directly via input_data.teacher_id
-        # and nlp_teacher_name was extracted
-        if not final_teacher_id and nlp_teacher_name: # nlp_teacher_name is now effective_teacher_name for this logic
-            if db_conn and db_conn.is_connected():
-                final_teacher_id = get_or_create_teacher(db_conn, nlp_teacher_name) # Use extracted name
-                if not final_teacher_id:
-                    print(f"API WARNING: Could not get or create teacher '{nlp_teacher_name}'. Plan will be saved without specific teacher linkage if schema allows.")
-            else: # This case should be hit if MYSQL_DB_NAME was not set or connection failed
-                print("API WARNING: No DB connection to get/create teacher. Plan will not be associated with a teacher.")
-        
         # If after all that, final_teacher_id is still None, it will be saved as such if DB allows.
         
         plan_id = save_teaching_plan(
             db_conn,
-            subject, # Use NLP extracted subject
             title_to_save,
             generated_content,
             final_teacher_id 
@@ -228,7 +203,6 @@ Output MUST be a JSON object.
             return TeachingPlanOutput(
                 teaching_plan_id=plan_id,
                 title=title_to_save,
-                subject=subject, # Use NLP extracted subject
                 generated_plan_content=generated_content,
                 teacher_id=final_teacher_id 
             )
@@ -236,7 +210,6 @@ Output MUST be a JSON object.
             # save_teaching_plan would have printed an error
             return TeachingPlanOutput(
                 title=title_to_save,
-                subject=subject, # Use NLP extracted subject
                 generated_plan_content=generated_content,
                 error_message="Plan generated but failed to save to database. Check server logs."
             )
@@ -250,6 +223,7 @@ Output MUST be a JSON object.
         if db_conn and db_conn.is_connected():
             print("Closing DB connection for /teaching-plans/generate-initial/ endpoint.")
             db_conn.close()
+
 
 @router.post(
     "/assessments/generate/",
@@ -289,7 +263,6 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput = Body(..., e
 You are an AI assistant that extracts parameters for generating an assessment from a user's query.
 The user wants to generate an assessment. Extract the following entities:
 - "teaching_plan_content" (string, required): The core content, topic, or summary of material the assessment should cover.
-- "teacher_name" (string, optional): The name of the teacher for whom the assessment is being created.
 - "question_preferences" (object, optional): A dictionary specifying desired question types and counts (e.g., {{"multiple-choice": 3, "short-answer": 2}}).
 - "title_for_db" (string, optional): A specific title for saving the assessment.
 
@@ -411,7 +384,7 @@ Output MUST be a JSON object.
 
 @router.post(
     "/student-assessments/evaluate-answers/",
-    response_model=List[StudentAssessmentEvaluationOutput],
+    response_model=Message, # Changed from List[StudentAssessmentEvaluationOutput]
     summary="Evaluate Student's Assessment Answers from Natural Language Query",
     description="Accepts a natural language query detailing a student's answers to an assessment. "
                 "Uses an LLM to extract the answers, then evaluates them using the service layer, "
@@ -419,7 +392,7 @@ Output MUST be a JSON object.
                 "and `student_name` (optional, but one of student_id or student_name must be resolvable) "
                 "are provided directly in the input alongside the query.",
     responses={
-        200: {"description": "Student answers extracted, evaluated, and saved successfully."},
+        200: {"model": Message, "description": "Student answers processed and saved successfully."}, # Changed description and model if it was different
         400: {"model": Message, "description": "Bad Request (e.g., invalid query, missing essential info after NLP, NLP processing error, or missing required direct fields like assessment_id)"},
         422: {"model": Message, "description": "Validation Error (e.g., assessment_id is not an int)"},
         500: {"model": Message, "description": "Internal Server Error / LLM or DB failure"}
@@ -463,9 +436,8 @@ The user wants to evaluate a student's assessment. Extract the following entitie
     - "question_identifier" (string, required): The identifier of the question (e.g., "Question 1", "1a", "Section A Q1").
     - "student_answer_text" (string, required): The text of the student's answer.
   Example format for answers field: [{"question_identifier": "Q1", "student_answer_text": "Paris"}, {"question_identifier": "Q2", "student_answer_text": "Water"}]
-- "student_name_from_query" (string, optional): If the query explicitly mentions the student's name (e.g., "John Doe answered..."), extract it. This is a fallback if student_name is not directly provided.
 
-The user will also provide student_id (optional), student_name (optional direct input), and assessment_id (required direct input) separately from the main query text. Your primary focus for extraction from the query text is the "answers" list and "student_name_from_query" if present.
+The user will also provide student_id (optional), student_name (optional direct input), and assessment_id (required direct input) separately from the main query text. Your primary focus for extraction from the query text is the "answers" list.
 If the "answers" list cannot be extracted or is malformed (e.g., missing identifiers or text), state that in the "error" field of your JSON.
 Output MUST be a JSON object.
 """
@@ -492,8 +464,9 @@ Output MUST be a JSON object.
     
     # Determine student_name (StudentAssessmentInput model requires it)
     final_student_name = input_data.student_name
-    if not final_student_name:
-        final_student_name = parsed_entities_dict.get("student_name_from_query")
+    # Removed: student_name_from_query is no longer extracted by NLP for this endpoint.
+    # if not final_student_name:
+    #     final_student_name = parsed_entities_dict.get("student_name_from_query") 
     
     if not final_student_name: # If still no name, and student_id also wasn't given directly (Pydantic would catch if student_name was required on NLInput and not given)
          # StudentAssessmentInput requires student_name. If student_id is also missing, it's an issue.
@@ -523,11 +496,12 @@ Output MUST be a JSON object.
             raise HTTPException(status_code=500, detail=overall_error)
         
         # Check if any individual answer failed to save (though service might raise before this)
+        # Log warning if needed, but the response will be a generic success message.
         if evaluation_results and any(result.error_message and not result.answer_id for result in evaluation_results):
-             print("API WARNING: Some answers may not have been saved successfully. Check response details.")
-             # Still return 200 but with error messages in the items.
+             print("API WARNING: Some answers may not have been saved successfully during the evaluation process. Check service logs for details.")
+             # The endpoint will still return the generic success message as per requirements.
 
-        return evaluation_results
+        return Message(message="Student assessment answers processed and saved successfully.")
             
     except HTTPException as he:
         raise he
@@ -697,3 +671,36 @@ async def get_practice_feedback_endpoint(input_data: PracticeFeedbackNLInput = B
 # The /natural-query/ endpoint and its implementation 
 # async def natural_language_query_endpoint(...)
 # have been removed.
+
+
+# --- Endpoint to get student performance for a specific assessment ---
+@router.get(
+    "/assessments/{assessment_id}/student-performance/",
+    response_model=List[StudentPerformanceDetail],
+    summary="Get All Student Performance Details for a Specific Assessment",
+    description="Retrieves a list of detailed performance records for all students who took a specific assessment. "
+                "This is typically for a teacher to view class performance on a given assessment.",
+    responses={
+        200: {"description": "Successfully retrieved student performance details."},
+        404: {"model": Message, "description": "Assessment not found."},
+        500: {"model": Message, "description": "Internal Server Error."}
+    }
+)
+async def get_assessment_performance_for_teacher(assessment_id: int):
+    """
+    Endpoint to fetch all student performance data for a given assessment ID.
+    - `assessment_id`: Path parameter specifying the assessment.
+    - Returns a list of `StudentPerformanceDetail` objects.
+    - Handles cases like assessment not found by raising HTTPException (expected from service).
+    """
+    try:
+        performance_details = await get_student_assessment_performance_service(assessment_id=assessment_id)
+        # If service returns empty list for a valid assessment_id with no submissions, it's a valid 200.
+        # If assessment_id itself is invalid/not found, service should raise HTTPException.
+        return performance_details
+    except HTTPException as he:
+        raise he # Re-raise HTTPExceptions (like 404, 501 from service) to let FastAPI handle them
+    except Exception as e:
+        print(f"API ERROR: An unexpected error occurred in /assessments/{assessment_id}/student-performance/ endpoint: {e}")
+        # Log the full error e for server-side debugging
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")

@@ -1,6 +1,19 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Union
 
+
+from datetime import datetime
+class StudentPerformanceDetail(BaseModel):
+    answer_id: int
+    assessment_id: int
+    student_id: int
+    student_name: Optional[str] = None # Requires join in DB query
+    question_identifier: str
+    student_answer_text: Optional[str] = None
+    llm_evaluation_feedback: Optional[str] = None
+    llm_assessed_correctness: Optional[str] = None
+    submission_timestamp: datetime
+
 class StudentQuestionInput(BaseModel):
     question: str = Field(..., example="Explain the concept of photosynthesis.")
     student_id: Optional[int] = Field(None, example=123, description="Optional student ID for history tracking.")
@@ -29,7 +42,6 @@ class TeachingPlanInput(BaseModel):
 class TeachingPlanOutput(BaseModel):
     teaching_plan_id: Optional[int] = None # If saved
     title: str
-    subject: str
     generated_plan_content: str
     teacher_id: Optional[int] = None
     error_message: Optional[str] = None

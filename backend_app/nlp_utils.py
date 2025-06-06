@@ -65,8 +65,8 @@ async def parse_query_with_llm(
     chain = prompt_template | llm | output_parser
 
     try:
-        # The input to ainoke should match the input variables in the HumanMessagePromptTemplate,
-        # which is "user_query" in this case.
+        # The input to ainoke should match the input variables in the HumanMessage,
+        # which is "user_query" in this case. The raw query is passed directly.
         response_json = await chain.ainvoke({"user_query": query})
         return response_json  # This should be a dictionary parsed by JsonOutputParser
     
@@ -91,37 +91,3 @@ async def parse_query_with_llm(
         
         return {"error": "An unexpected error occurred while processing the query with LLM.", 
                 "details": f"{error_type}: {str(e)}"}
-
-# Example usage (for testing purposes, not part of the module's regular execution path):
-# if __name__ == '__main__':
-#     import asyncio
-#     async def main_test():
-#         if not llm:
-#             print("LLM not initialized, cannot run example.")
-#             return
-
-#         test_query = "I want to practice Algebra 1 on topics like linear equations and quadratics. My student ID is 789."
-#         test_system_prompt = """
-# You are an AI assistant helping to understand student requests for a learning platform.
-# Extract the following information from the student's query:
-# - "intent": Should be "generate_practice_questions".
-# - "entities": A dictionary containing:
-#   - "practice_topic" (string, required): The topic for practice.
-#   - "student_id" (integer, optional): The ID of the student.
-#   - "sub_topics" (list of strings, optional): Specific sub-topics mentioned.
-# """
-#         # Expected output (conceptual):
-#         # {
-#         #   "intent": "generate_practice_questions",
-#         #   "entities": {
-#         #     "practice_topic": "Algebra 1",
-#         #     "student_id": 789,
-#         #     "sub_topics": ["linear equations", "quadratics"]
-#         #   }
-#         # }
-
-#         parsed_result = await parse_query_with_llm(test_query, test_system_prompt)
-#         print("\n--- Example LLM Parsing Result ---")
-#         print(json.dumps(parsed_result, indent=2))
-
-#     asyncio.run(main_test())

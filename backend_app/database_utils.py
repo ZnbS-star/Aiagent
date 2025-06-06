@@ -163,7 +163,65 @@ def init_db():
         cursor.close()
         conn_to_db.close()
 
-def save_teaching_plan(db_conn, subject, title, content, teacher_id=None):
+def get_student_performance_for_assessment(db_conn, assessment_id: int) -> list:
+    """
+    Retrieves all student performance details for a specific assessment.
+
+    Args:
+        db_conn: Active MySQL database connection.
+        assessment_id (int): The ID of the assessment.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary represents a student's answer
+              and evaluation details. Returns an empty list if no data or an error occurs.
+    """
+    if not db_conn:
+        print("No database connection provided to get_student_performance_for_assessment.")
+        return []
+
+    results = []
+    cursor = None  # Initialize cursor to None for finally block
+    try:
+        cursor = db_conn.cursor(dictionary=True)
+        sql = """
+            SELECT
+                saa.answer_id,
+                saa.assessment_id,
+                saa.student_id,
+                s.student_name,
+                saa.question_identifier,
+                saa.student_answer_text,
+                saa.llm_evaluation_feedback,
+                saa.llm_assessed_correctness,
+                saa.submission_timestamp
+            FROM
+                student_assessment_answers saa
+            LEFT JOIN
+                students s ON saa.student_id = s.student_id
+            WHERE
+                saa.assessment_id = %s
+            ORDER BY
+                s.student_name, saa.submission_timestamp;
+        """
+        cursor.execute(sql, (assessment_id,))
+        results = cursor.fetchall()
+        if not results:
+            print(f"No performance data found for assessment_id: {assessment_id}")
+            return [] # Return empty list if no records found, which is not an error
+
+    except mysql.connector.Error as err:
+        print(f"Error retrieving student performance for assessment_id {assessment_id}: {err}")
+        return [] # Return empty list on error
+    except Exception as e:
+        print(f"An unexpected error occurred in get_student_performance_for_assessment: {e}")
+        return [] # Return empty list on unexpected error
+    finally:
+        if cursor:
+            cursor.close()
+            
+    return results
+
+def save_teaching_plan(db_conn,title, content, teacher_id=None):
     """Saves a teaching plan to the database."""
     if not db_conn:
         print("No database connection provided to save_teaching_plan.")
@@ -171,7 +229,7 @@ def save_teaching_plan(db_conn, subject, title, content, teacher_id=None):
     
     cursor = db_conn.cursor()
     sql = "INSERT INTO teaching_plans (teacher_id, subject, title, content) VALUES (%s, %s, %s, %s)"
-    val = (teacher_id, subject, title, content)
+    val = (teacher_id,title, content)
     try:
         cursor.execute(sql, val)
         db_conn.commit()

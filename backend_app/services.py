@@ -19,8 +19,10 @@ from backend_app.models import (
     AssessmentInput, AssessmentOutput, 
     StudentAssessmentInput, StudentAssessmentEvaluationOutput,
     PracticeQuestionsInput, PracticeQuestionItem, PracticeQuestionsOutput,
-    PracticeFeedbackInput, PracticeFeedbackOutput # Added
+    PracticeFeedbackInput, PracticeFeedbackOutput, StudentPerformanceDetail # Added StudentPerformanceDetail
 )
+
+from fastapi import HTTPException # Added for placeholder service
 
 from backend_app.assessment_generator import ( # Used by generate_assessment_service
         extract_keywords_with_llm,
@@ -48,7 +50,8 @@ from backend_app.database_utils import (
         save_student_assessment_answer, 
         get_student_history_summary, 
         save_practice_question_to_catalog,
-        save_practice_attempt # Added for feedback service
+        save_practice_attempt, # Added for feedback service
+        get_student_performance_for_assessment # Added for new service
     )
 
 # Embeddings and DB
@@ -98,7 +101,7 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
             student_question=input_data.question,
             embeddings_model_instance=embeddings,
             vector_store_dir=CHROMA_PERSIST_DIR,
-            top_k=20 # Default or from input_data if added
+            top_k=10 # Default or from input_data if added
         )
         print(f"SERVICE: RAG search retrieved {len(rag_snippets)} snippets.")
 
@@ -147,8 +150,7 @@ def _get_dashscope_api_key():
     return api_key
 
 async def generate_initial_teaching_plan_service(
-    teacher_name: str, # Used in system message via prepare_prompt_components
-    subject: str,      # Used in system message via prepare_prompt_components
+
     initial_outline: str, # Used for RAG query and as initial_human_task
     style_tone:str,
     output_structure:str
@@ -158,8 +160,6 @@ async def generate_initial_teaching_plan_service(
     Generates an initial teaching plan based on inputs, using RAG and an LLM.
     This is a single-shot generation without interactive refinement.
     """
-    print(f"SERVICE: Initiating teaching plan generation for subject: {subject} by {teacher_name}")
-
     zhipuai_api_key = _get_zhipuai_api_key() # Uses the existing helper
     # A. RAG Search Logic
     retrieved_rag_snippets = []
@@ -185,13 +185,12 @@ async def generate_initial_teaching_plan_service(
 
     # B. Prepare Prompt Components (Simplified local version)
     system_message = (
-        f"You are an experienced {subject}学科教师, {teacher_name}. Your task is to create a detailed "
+        f"You are an experienced 教师, Your task is to create a detailed "
         "first draft of a teaching plan based on the provided outline and supplementary materials. "
         "Focus on clarity, accuracy, and comprehensive coverage of the key points."
     )
     
     human_message_parts = [
-        f"Please generate a detailed teaching plan for the subject: {subject}.",
         f"The initial outline provided by the teacher is:\n{initial_outline}\n"
     ]
     if retrieved_rag_snippets:
@@ -600,4 +599,61 @@ async def get_practice_feedback_service(
             db_conn.close()
             print("SERVICE: DB connection closed for get_practice_feedback_service.")
 
+# --- Service to get student performance details for an assessment ---
+async def get_student_assessment_performance_service(assessment_id: int) -> List[StudentPerformanceDetail]:
+    """
+    Service to retrieve all student performance details for a specific assessment.
+    """
+    print(f"SERVICE: Call received for get_student_assessment_performance_service with assessment_id: {assessment_id}")
+    
+    db_conn = None
+    performance_details: List[StudentPerformanceDetail] = []
+    
+    MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+    if not MYSQL_DB_NAME:
+        print("SERVICE ERROR: MYSQL_DB environment variable not set. Cannot fetch performance details.")
+        # Depending on desired behavior, could raise 500 or return empty with logged error.
+        # Raising 500 as it's a configuration issue preventing service operation.
+        raise HTTPException(status_code=500, detail="Database configuration error.")
 
+    try:
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not db_conn:
+            print("SERVICE ERROR: Failed to connect to the database.")
+            raise HTTPException(status_code=500, detail="Failed to connect to the database.")
+
+        raw_performance_data = get_student_performance_for_assessment(db_conn, assessment_id)
+
+        if not raw_performance_data:
+            # This isn't necessarily an error; it could be a valid assessment with no submissions yet.
+            print(f"SERVICE: No performance data found for assessment_id: {assessment_id}. Returning empty list.")
+            return []
+
+        # Map dictionary results to StudentPerformanceDetail Pydantic models
+        for row in raw_performance_data:
+            # Pydantic will validate types. If a datetime object is not directly returned
+            # by connector for submission_timestamp and is a string, it might need parsing.
+            # Assuming the connector provides Python datetime objects for TIMESTAMP columns.
+            try:
+                performance_details.append(StudentPerformanceDetail(**row))
+            except Exception as pydantic_err: # Catch potential Pydantic validation errors
+                print(f"SERVICE ERROR: Pydantic validation error for row {row}: {pydantic_err}")
+                # Decide how to handle: skip this row, or raise an error for the whole request.
+                # For now, let's skip problematic rows and log.
+                continue 
+        
+        print(f"SERVICE: Successfully retrieved and mapped {len(performance_details)} performance records for assessment_id: {assessment_id}")
+
+    except HTTPException as he: # Re-raise HTTPExceptions from connection attempts
+        raise he
+    except Exception as e:
+        print(f"SERVICE ERROR: An unexpected error occurred in get_student_assessment_performance_service: {e}")
+        # Log the full error e for server-side debugging
+        # For a teacher-facing endpoint, returning a 500 is appropriate for unexpected issues.
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred while fetching performance data: {str(e)}")
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+            print(f"SERVICE: DB connection closed for get_student_assessment_performance_service (assessment_id: {assessment_id}).")
+            
+    return performance_details
