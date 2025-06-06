@@ -1,6 +1,4 @@
 import os # For environment variables & path checks
-os.environ["ZHIPUAI_API_KEY"] = "3573c5d116ae476eac14e7c61faffaab.LYbGSlVQ3qRNDcfR"
-os.environ["DASHSCOPE_API_KEY"] ="sk-36c2e0675a6d4d1b9a528c4b79f9f400"
 from langchain_chroma import Chroma
 from langchain_community.chat_models import ChatZhipuAI # For LLM interaction
 from langchain_core.prompts import ChatPromptTemplate   # For LLM interaction

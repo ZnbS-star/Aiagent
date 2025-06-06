@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 
 class StudentQuestionInput(BaseModel):
     question: str = Field(..., example="Explain the concept of photosynthesis.")
@@ -105,6 +105,37 @@ class PracticeFeedbackOutput(BaseModel):
     correctness_assessment: str
     detailed_feedback: str
     error_message: Optional[str] = None
+
+class TeachingPlanNLInput(BaseModel):
+    query: str = Field(..., example="Generate a high school biology teaching plan about cell division for Dr. Evo. Make it engaging.")
+    teacher_id: Optional[int] = Field(None, description="Optional teacher ID if known, e.g., from session.")
+
+class PracticeQuestionNLInput(BaseModel):
+    query: str = Field(..., example="Generate some python list comprehension questions, maybe 2 multiple choice and 1 programming.")
+    student_id: Optional[int] = Field(None, description="Optional student ID for history personalization.")
+    student_name: Optional[str] = Field(None, description="Optional student name if ID is not known.")
+
+class AssessmentNLInput(BaseModel):
+    query: str = Field(..., example="Generate an assessment for Prof. Oak based on the Kanto region Pokedex, Gym Leaders, and Elite Four. Include 2 multiple-choice and 1 short-answer. Title it 'Kanto Basics Quiz'.")
+    teacher_id: Optional[int] = Field(None, description="Optional teacher ID if known.")
+
+class StudentAssessmentNLInput(BaseModel):
+    query: str = Field(..., example="For assessment 12, student John Doe (id 77) answered: Q1 was 'Paris', Section B Q2 was 'The mitochondria is the powerhouse of the cell'.")
+    student_id: Optional[int] = Field(None, description="Student ID, if known and can be extracted or provided separately.")
+    student_name: Optional[str] = Field(None, description="Student Name. If not provided here, LLM will attempt to extract from query. Service requires a name.")
+    assessment_id: int = Field(..., description="ID of the assessment being evaluated.")
+
+class PracticeFeedbackNLInput(BaseModel):
+    student_query_answer: str = Field(..., example="I think the answer is 'list comprehension'.")
+    student_id: int = Field(..., example=123)
+    catalog_id: int = Field(..., example=101)
+    question_text: str = Field(..., example="What Python feature allows creating lists based on existing lists in a concise way?")
+    model_answer: str = Field(..., example="List comprehension") # Corrected from model_answer_text in original prompt for consistency with PracticeFeedbackInput
+    question_type: str = Field(..., example="Short-Answer")
+
+# --- NLP Unified Query Models --- # REMOVED
+# class NaturalLanguageQueryInput(BaseModel): ...
+# class NLQueryResponse(BaseModel): ...
 
 # Generic message model for simple status updates or errors not fitting other models
 class Message(BaseModel):
