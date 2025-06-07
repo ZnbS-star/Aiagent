@@ -2,46 +2,44 @@ import os
 import sys
 from typing import List
 
-# Adjust path to import from root directory and database_utils
-# This is a common way to handle imports from a parent directory in a sub-directory app
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from backend_app.models import StudentQuestionInput, StudentQuestionOutput
-from backend_app.database_utils import get_mysql_connection, get_or_create_student,get_or_create_teacher # Assuming student ID might be used later
+from backend_app.database_utils import get_mysql_connection, get_or_create_student,get_practice_question_details_by_id 
 from backend_app.student_qa import (
     search_knowledge_base_for_answer, 
     construct_student_qa_prompt, 
     get_llm_response_to_student
 )
 from backend_app.models import (
-    AssessmentInput, AssessmentOutput, 
+    AssessmentInput, 
     StudentAssessmentInput, StudentAssessmentEvaluationOutput,
     PracticeQuestionsInput, PracticeQuestionItem, PracticeQuestionsOutput,
-    PracticeFeedbackInput, PracticeFeedbackOutput, StudentPerformanceDetail # Added StudentPerformanceDetail
+    PracticeFeedbackInput, PracticeFeedbackOutput, StudentPerformanceDetail 
 )
 
-from fastapi import HTTPException # Added for placeholder service
+from fastapi import HTTPException 
 
-from backend_app.assessment_generator import ( # Used by generate_assessment_service
-        extract_keywords_with_llm,
+from backend_app.assessment_generator import ( 
+
         perform_rag_search,
         construct_assessment_prompt,
         generate_assessment_with_llm
     )
-from backend_app.assessment_evaluation import ( # Used by evaluate_student_assessment_answers_service
+from backend_app.assessment_evaluation import ( 
         get_assessment_content_by_id, 
         construct_evaluation_prompt,
         get_llm_evaluation_for_answer, 
         parse_llm_evaluation
     )
-from backend_app.practice_assistant import ( # Used by generate_practice_questions_service
+from backend_app.practice_assistant import ( 
         search_knowledge_for_practice_topic,
         construct_practice_question_prompt,
         get_llm_practice_questions,
-        parse_questions_and_answers,
-        construct_feedback_prompt as pa_construct_feedback_prompt, # Alias to avoid name clash
+        construct_feedback_prompt as pa_construct_feedback_prompt, 
         get_llm_feedback_on_answer as pa_get_llm_feedback_on_answer,
         parse_feedback_and_correctness as pa_parse_feedback_and_correctness
     )
@@ -50,35 +48,33 @@ from backend_app.database_utils import (
         save_student_assessment_answer, 
         get_student_history_summary, 
         save_practice_question_to_catalog,
-        save_practice_attempt, # Added for feedback service
-        get_student_performance_for_assessment # Added for new service
+        save_practice_attempt, 
+        get_student_performance_for_assessment 
     )
 
-# Embeddings and DB
+
 from langchain_community.embeddings import ZhipuAIEmbeddings
 from langchain_chroma import Chroma
-# LLMs
+
 from langchain_community.chat_models import ChatZhipuAI
-from langchain_community.chat_models.tongyi import ChatTongyi # For assessment generation
-# Prompts & Parsers
+from langchain_community.chat_models.tongyi import ChatTongyi 
+
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
-CHROMA_PERSIST_DIR = 'chroma_db_zhipu' # From student_qa.py
+CHROMA_PERSIST_DIR = 'chroma_db_zhipu' 
 
 def _get_zhipuai_api_key():
     api_key = os.environ.get("ZHIPUAI_API_KEY")
     if api_key is None:
         print("Warning: ZHIPUAI_API_KEY not found in environment. Using default key for service layer.")
-        # In a real app, this might raise an error or use a config service
+        
     return api_key
 
-# --- Service Functions ---
+
 
 async def process_student_question_service(input_data: StudentQuestionInput) -> StudentQuestionOutput:
-    """
-    Service layer function to process a student's question using RAG and LLM.
-    """
+
     print(f"SERVICE: Processing student question: '{input_data.question}'")
     api_key = _get_zhipuai_api_key()
     rag_snippets = []
@@ -87,7 +83,7 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
     try:
 
         try:
-            embeddings = ZhipuAIEmbeddings() # Assumes API key is in env or handled by class
+            embeddings = ZhipuAIEmbeddings() 
         except Exception as e:
             print(f"SERVICE ERROR: Failed to initialize embeddings model: {e}")
             return StudentQuestionOutput(
@@ -101,19 +97,18 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
             student_question=input_data.question,
             embeddings_model_instance=embeddings,
             vector_store_dir=CHROMA_PERSIST_DIR,
-            top_k=10 # Default or from input_data if added
+            top_k=10 
         )
         print(f"SERVICE: RAG search retrieved {len(rag_snippets)} snippets.")
 
-        # 3. Construct Prompt for LLM
+        
         prompt_components = construct_student_qa_prompt(
             student_question=input_data.question,
             rag_snippets=rag_snippets
         )
         print("SERVICE: Prompt constructed.")
 
-        # 4. Get LLM Response
-        # get_llm_response_to_student expects the API key to be passed directly
+     
         llm_response = get_llm_response_to_student(
             system_prompt=prompt_components["system_message"],
             human_prompt=prompt_components["human_message"], 
@@ -143,11 +138,7 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
 
 
 
-def _get_dashscope_api_key():
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
-    if api_key is None:
-        print("Warning: DASHSCOPE_API_KEY not found in environment. Using default key for Dashscope/Tongyi services.")
-    return api_key
+
 
 async def generate_initial_teaching_plan_service(
 
@@ -157,7 +148,17 @@ async def generate_initial_teaching_plan_service(
     # LLM and Embeddings will be initialized inside, using env vars for keys
 ) -> tuple[str , List[str] ]: # Returns (plan_content, rag_snippets_used) or (None, None)
     zhipuai_api_key = _get_zhipuai_api_key() # Uses the existing helper
-    # A. RAG Search Logic
+    if not style_tone or not style_tone.strip():
+        final_style_tone = "清晰、专业且易于理解" 
+        print(f"SERVICE INFO: 'style_tone' was empty, using default: '{final_style_tone}'")
+    else:
+        final_style_tone = style_tone
+    # 2. 设置 output_structure 的默认值
+    if not output_structure or not output_structure.strip():
+        final_output_structure = "请为以下教学大纲生成一个完整的教案。内容应包括：1. 教学目标；2. 知识点详解；3. 课堂活动与互动环节建议；4. 简单的实训练习及其指导；5. 预估的时间分布。" # 这是一个非常全面和实用的默认结构
+        print(f"SERVICE INFO: 'output_structure' was empty, using default: '{final_output_structure}'")
+    else:
+        final_output_structure = output_structure
     retrieved_rag_snippets = []
     try:
         print(f"SERVICE: Performing RAG search for query: '{initial_outline[:100]}...'")
@@ -223,58 +224,37 @@ async def generate_initial_teaching_plan_service(
 
 async def generate_assessment_service(
     input_data: AssessmentInput,
-) -> tuple[str , List[str] ]: # Returns (generated_assessment_content, keywords_for_rag_info)
-    """
-    Service to generate assessment questions based on teaching plan content,
-    using keyword extraction, RAG, and an LLM.
-    """
+) -> tuple[str , List[str] ]: 
+
     print(f"SERVICE: Initiating assessment generation for teacher_id: {input_data.teacher_id or input_data.teacher_name}")
 
-    zhipuai_api_key = _get_zhipuai_api_key() # For RAG embeddings
-    dashscope_api_key = _get_dashscope_api_key() # For Tongyi LLM (keywords & assessment gen)
+    if not input_data.question_preferences:
+       
+        final_question_prefs = {"选择题": 3, "简答题": 2, "判断题": 2}
+        print(f"SERVICE INFO: 'question_preferences' was empty, using default: {final_question_prefs}")
+    else:
+        final_question_prefs = input_data.question_preferences
 
-    # Ensure API keys are in os.environ for Langchain components that might expect it
-    if "ZHIPUAI_API_KEY" not in os.environ and zhipuai_api_key:
-        os.environ["ZHIPUAI_API_KEY"] = zhipuai_api_key
-    if "DASHSCOPE_API_KEY" not in os.environ and dashscope_api_key:
-        os.environ["DASHSCOPE_API_KEY"] = dashscope_api_key
-
-    extracted_keywords = []
+ 
     retrieved_rag_snippets = []
     generated_assessment_content = None
 
     try:
-        # 1. Keyword Extraction (using ChatTongyi as per assessment_generator.py)
-        # assessment_generator.py initializes ChatTongyi inside its functions or main block.
-        # Here, we need an instance or to call a helper.
-        # Let's assume extract_keywords_with_llm can take an initialized LLM or initialize one.
-        # For simplicity, let's initialize it here.
-        print("SERVICE: Initializing LLM for keyword extraction (ChatTongyi)...")
-        keyword_llm = ChatTongyi(temperature=0.5) # API key from env
-        
-        extracted_keywords = extract_keywords_with_llm(
-            input_data.teaching_plan_content, 
-            keyword_llm # Pass the instance
-        )
-        print(f"SERVICE: Extracted keywords: {extracted_keywords}")
 
-        # 2. RAG Search (if keywords were extracted)
-        if extracted_keywords:
-            print("SERVICE: Initializing embeddings for RAG (ZhipuAIEmbeddings)...")
-            embeddings_for_rag = ZhipuAIEmbeddings() # API key from env
-            if os.path.exists(CHROMA_PERSIST_DIR):
-                retrieved_rag_snippets = perform_rag_search(
-                    extracted_keywords, 
-                    embeddings_for_rag, 
-                    CHROMA_PERSIST_DIR
-                )
-                print(f"SERVICE: RAG search retrieved {len(retrieved_rag_snippets)} snippets.")
-            else:
-                print(f"SERVICE WARNING: Chroma DB directory '{CHROMA_PERSIST_DIR}' not found. Proceeding without RAG.")
+        print("SERVICE: Initializing LLM for keyword extraction (ChatTongyi)...")
+
+        embeddings_for_rag = ZhipuAIEmbeddings() # API key from env
+        if os.path.exists(CHROMA_PERSIST_DIR):
+            retrieved_rag_snippets = perform_rag_search(
+            input_data.teaching_plan_content, 
+            embeddings_for_rag, 
+            CHROMA_PERSIST_DIR
+            )
+            print(f"SERVICE: RAG search retrieved {len(retrieved_rag_snippets)} snippets.")
+        else:
+            print(f"SERVICE WARNING: Chroma DB directory '{CHROMA_PERSIST_DIR}' not found. Proceeding without RAG.")
         
-        # 3. Construct Prompt for Assessment Generation
-        # assessment_generator.construct_assessment_prompt expects: 
-        # (teaching_plan_content, retrieved_rag_snippets, question_preferences)
+
         assessment_prompt_components = construct_assessment_prompt(
             input_data.teaching_plan_content,
             retrieved_rag_snippets,
@@ -282,9 +262,7 @@ async def generate_assessment_service(
         )
         print("SERVICE: Assessment prompt constructed.")
 
-        # 4. Generate Assessment with LLM (using ChatTongyi as per assessment_generator.py)
-        # assessment_generator.generate_assessment_with_llm expects system_prompt, human_prompt
-        # It initializes ChatTongyi internally.
+
         generated_assessment_content = generate_assessment_with_llm(
              assessment_prompt_components["system_message"],
              assessment_prompt_components["human_message"]
@@ -298,27 +276,19 @@ async def generate_assessment_service(
 
     except Exception as e:
         print(f"SERVICE ERROR during assessment generation pipeline: {e}")
-        # Return None for content, but keywords might still be useful for debugging/partial success
-        return None, extracted_keywords 
 
-    return generated_assessment_content, extracted_keywords
+        return None 
+
+    return generated_assessment_content
 
 async def evaluate_student_assessment_answers_service(
     input_data: StudentAssessmentInput
 ) -> List[StudentAssessmentEvaluationOutput]:
-    """
-    Service to evaluate student's answers for a given assessment, save them, and return evaluations.
-    """
+
     print(f"SERVICE: Initiating evaluation for student_id: {input_data.student_id or input_data.student_name} on assessment_id: {input_data.assessment_id}")
-
     zhipuai_api_key = _get_zhipuai_api_key() # For ChatZhipuAI used in assessment_evaluation.py
-    # Ensure API key is in os.environ for Langchain components
-    if "ZHIPUAI_API_KEY" not in os.environ and zhipuai_api_key:
-        os.environ["ZHIPUAI_API_KEY"] = zhipuai_api_key
-
     results: List[StudentAssessmentEvaluationOutput] = []
     db_conn = None
-    
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
     try:
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
@@ -334,14 +304,11 @@ async def evaluate_student_assessment_answers_service(
             if not actual_student_id:
                 raise Exception(f"Failed to get or create student: {input_data.student_name}")
         
-        # 2. Fetch Assessment Content
-        # get_assessment_content_by_id is synchronous, if service is async, this might need await asyncio.to_thread
         assessment_data = get_assessment_content_by_id(db_conn, input_data.assessment_id)
         if not assessment_data or not assessment_data.get("content"):
             raise ValueError(f"Could not retrieve content for assessment ID {input_data.assessment_id}.")
         assessment_content = assessment_data["content"]
 
-        # 3. Loop through answers, evaluate, display, and save
         for answer_item in input_data.answers:
             question_id_str = answer_item.question_identifier
             student_ans_text = answer_item.student_answer_text
@@ -353,12 +320,7 @@ async def evaluate_student_assessment_answers_service(
                 assessment_content, question_id_str, student_ans_text
             )
             
-            # Get LLM evaluation (this is a sync call from assessment_evaluation.py)
-            # If this service is async, this should be:
-            # raw_llm_evaluation = await get_llm_evaluation_for_answer(...)
-            # For now, assuming get_llm_evaluation_for_answer can be called directly if it's not async
-            # Or, we make this service function synchronous if its callees are sync.
-            # Let's assume for now direct call works or we'd refactor the callee to be async.
+
             raw_llm_evaluation = get_llm_evaluation_for_answer(
                 eval_prompt_components["system_message"],
                 eval_prompt_components["human_message"],
@@ -391,9 +353,7 @@ async def evaluate_student_assessment_answers_service(
             
     except Exception as e:
         print(f"SERVICE ERROR in evaluate_student_assessment_answers_service: {e}")
-        # Append a general error object if the whole process fails mid-way
-        # This might duplicate if an error was already added for DB config.
-        # A more robust error handling would check if results already contains an error.
+
         if not results or results[-1].error_message != "Database not configured.":
              results.append(StudentAssessmentEvaluationOutput(
                 assessment_id=input_data.assessment_id, 
@@ -414,36 +374,19 @@ async def evaluate_student_assessment_answers_service(
 async def generate_practice_questions_service(
     input_data: PracticeQuestionsInput
 ) -> PracticeQuestionsOutput:
-    """
-    Service to generate practice questions, incorporating RAG and student history,
-    and save them to the catalog.
-    """
     print(f"SERVICE: Generating practice questions for topic: {input_data.practice_topic}")
-    
-    zhipuai_api_key = _get_zhipuai_api_key()
-    dashscope_api_key = _get_dashscope_api_key() # For ChatTongyi (question generation)
-
-    # Ensure API keys are in os.environ for Langchain components
-    if "ZHIPUAI_API_KEY" not in os.environ and zhipuai_api_key:
-        os.environ["ZHIPUAI_API_KEY"] = zhipuai_api_key
-    if "DASHSCOPE_API_KEY" not in os.environ and dashscope_api_key:
-        os.environ["DASHSCOPE_API_KEY"] = dashscope_api_key
-
     db_conn = None
     student_id = input_data.student_id
     history_summary = "No specific student performance history provided."
     retrieved_rag_snippets = []
     generated_q_items: List[PracticeQuestionItem] = []
-    
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
     if not MYSQL_DB_NAME:
         return PracticeQuestionsOutput(generated_questions=[], error_message="Database not configured.")
-
     try:
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
         if not db_conn:
             raise Exception("Failed to connect to the database.")
-     
 
         # 3. Get Student History Summary (if student_id is available)
         if student_id:
@@ -472,38 +415,47 @@ async def generate_practice_questions_service(
         raw_generated_questions = get_llm_practice_questions(
             prompt_components["system_message"],
             prompt_components["human_message"]
-            # API key for ChatTongyi is handled by its instantiation if in env
+
         )
 
         # 7. Parse and Save Questions to Catalog
-        if raw_generated_questions:
-            parsed_list = parse_questions_and_answers(raw_generated_questions)
-            if parsed_list:
-                for item in parsed_list:
-                    concepts = [input_data.practice_topic] # Simple concept tagging
-                    catalog_id = save_practice_question_to_catalog(
-                        db_conn,
-                        item["question"],
-                        item["question_type"],
-                        item["model_answer"],
-                        concepts_list=concepts
-                        # No teacher_id here as per final schema for practice_questions_catalog
-                    )
-                    if catalog_id:
-                        generated_q_items.append(PracticeQuestionItem(
-                            catalog_id=catalog_id,
-                            question_type=item["question_type"],
-                            question_text=item["question"],
-                            model_answer=item["model_answer"]
-                        ))
-                    else:
-                        print(f"SERVICE WARNING: Failed to save a generated question to catalog: {item['question'][:50]}")
-                if not generated_q_items: # All questions failed to save
-                     return PracticeQuestionsOutput(generated_questions=[], error_message="Generated questions but failed to save any to catalog.")
-            else: # Parsing failed
-                return PracticeQuestionsOutput(generated_questions=[], error_message="Failed to parse generated questions from LLM.")
-        else: # LLM returned no questions
-            return PracticeQuestionsOutput(generated_questions=[], error_message="LLM failed to generate practice questions.")
+        if raw_generated_questions and raw_generated_questions.strip():
+
+            separator = "---参考答案与解析---"
+            if separator in raw_generated_questions:
+                parts = raw_generated_questions.split(separator, 1)
+                all_questions_text = parts[0].strip()
+                all_answers_text = parts[1].strip()
+            else:
+                # 如果找不到分隔符，做一个降级处理
+                print("SERVICE WARNING: Could not find the answer separator. Saving the entire content as question_text.")
+                all_questions_text = raw_generated_questions.strip()
+                all_answers_text = "（答案解析未找到，可能包含在题目文本中）"
+
+            # 将整套题目作为一个单元保存到数据库
+            concepts = [input_data.practice_topic]
+            catalog_id = save_practice_question_to_catalog( # 使用一个新的保存函数
+                db_conn,
+                all_questions_text,
+                all_answers_text,
+                concepts_list=concepts
+            )
+
+            if catalog_id:
+                # 成功保存，返回包含ID和完整内容的单个PracticeQuestionItem
+                generated_item = PracticeQuestionItem(
+                    catalog_id=catalog_id,
+                    question_text=all_questions_text,
+                    model_answer=all_answers_text,
+                    # question_type 字段不再需要
+                )
+                return PracticeQuestionsOutput(generated_questions=[generated_item], error_message=None)
+            else:
+                # 保存失败
+                return PracticeQuestionsOutput(generated_questions=[], error_message="生成了练习题但保存至题库失败。")
+
+        else: # LLM返回空内容
+            return PracticeQuestionsOutput(generated_questions=[], error_message="AI未能生成练习题内容。")
             
     except Exception as e:
         print(f"SERVICE ERROR in generate_practice_questions_service: {e}")
@@ -518,36 +470,30 @@ async def generate_practice_questions_service(
 async def get_practice_feedback_service(
     input_data: PracticeFeedbackInput
 ) -> PracticeFeedbackOutput:
-    """
-    Service to get LLM feedback on a student's practice answer and save the attempt.
-    """
     print(f"SERVICE: Getting feedback for student {input_data.student_id} on catalog_id {input_data.catalog_id}")
-
-    dashscope_api_key = _get_dashscope_api_key() # For ChatTongyi (feedback)
-    if "DASHSCOPE_API_KEY" not in os.environ and dashscope_api_key:
-        os.environ["DASHSCOPE_API_KEY"] = dashscope_api_key
-
     db_conn = None
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
-    if not MYSQL_DB_NAME:
-        return PracticeFeedbackOutput(correctness_assessment="Error", detailed_feedback="Database not configured.", error_message="Database not configured.")
-
     try:
-        # 1. Construct prompt for LLM feedback
-        # pa_construct_feedback_prompt expects: 
-        # (practice_question_text, model_answer_text, student_answer_text, question_type_str)
-        feedback_prompt_components = pa_construct_feedback_prompt(
-            input_data.question_text,
-            input_data.model_answer,
-            input_data.student_answer,
-            input_data.question_type
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not db_conn:
+            raise Exception("无法连接到数据库。")
+
+
+        question_details = get_practice_question_details_by_id(db_conn, input_data.catalog_id)
+        
+        if not question_details:
+            raise ValueError(f"在题库中未找到ID为 {input_data.catalog_id} 的练习题。")
+
+        # --- 2. 构建 Prompt (使用从数据库获取的数据) ---
+        feedback_prompt_components =pa_construct_feedback_prompt( 
+            question_text=question_details["question_text"],
+            model_answer_text=question_details["model_answer"],
+            student_answer_text=input_data.student_answer,
         )
 
-        # 2. Get LLM feedback (uses ChatTongyi via practice_assistant import)
         raw_llm_feedback = pa_get_llm_feedback_on_answer(
             feedback_prompt_components["system_message"],
             feedback_prompt_components["human_message"]
-            # API key for ChatTongyi is handled by its instantiation if in env
         )
 
         if not raw_llm_feedback:
@@ -593,9 +539,7 @@ async def get_practice_feedback_service(
 
 # --- Service to get student performance details for an assessment ---
 async def get_student_assessment_performance_service(assessment_id: int) -> List[StudentPerformanceDetail]:
-    """
-    Service to retrieve all student performance details for a specific assessment.
-    """
+
     print(f"SERVICE: Call received for get_student_assessment_performance_service with assessment_id: {assessment_id}")
     
     db_conn = None
@@ -604,8 +548,7 @@ async def get_student_assessment_performance_service(assessment_id: int) -> List
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
     if not MYSQL_DB_NAME:
         print("SERVICE ERROR: MYSQL_DB environment variable not set. Cannot fetch performance details.")
-        # Depending on desired behavior, could raise 500 or return empty with logged error.
-        # Raising 500 as it's a configuration issue preventing service operation.
+
         raise HTTPException(status_code=500, detail="Database configuration error.")
 
     try:
@@ -623,9 +566,7 @@ async def get_student_assessment_performance_service(assessment_id: int) -> List
 
         # Map dictionary results to StudentPerformanceDetail Pydantic models
         for row in raw_performance_data:
-            # Pydantic will validate types. If a datetime object is not directly returned
-            # by connector for submission_timestamp and is a string, it might need parsing.
-            # Assuming the connector provides Python datetime objects for TIMESTAMP columns.
+
             try:
                 performance_details.append(StudentPerformanceDetail(**row))
             except Exception as pydantic_err: # Catch potential Pydantic validation errors

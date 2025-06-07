@@ -1,7 +1,6 @@
+from typing import Any, Dict, Optional
 import mysql.connector
-import os
-from datetime import datetime # To potentially use for created_at if not using DB default
-import json # For storing concepts_list as JSON
+import json 
 from collections import Counter
 
 def get_mysql_connection(db_name=None):
@@ -26,7 +25,7 @@ def get_mysql_connection(db_name=None):
             connection_params['database'] = db_name
         
         conn = mysql.connector.connect(**connection_params)
-        # print(f"Successfully connected to MySQL (Database: {db_name if db_name else 'Server only'}).")
+        
         return conn
     except mysql.connector.Error as err:
         print(f"Error connecting to MySQL: {err}")
@@ -42,7 +41,7 @@ def init_db():
 
     cursor = conn_to_db.cursor()
     try:
-        # Teachers, Teaching Plans, Assessments
+        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS teachers (
             teacher_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -76,7 +75,7 @@ def init_db():
         """)
         print("Table 'assessments' (with teacher_id) ensured.")
 
-        # Students, Practice Questions Catalog, Practice Attempts
+        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS students (
             student_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -96,27 +95,25 @@ def init_db():
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """)
         print("Table 'practice_questions_catalog' (with concepts_covered, no teacher_id) ensured.")
-        # Remove teacher_id from practice_questions_catalog if it was added by an ALTER statement before
-        # This is a bit tricky as simply dropping a column that might not exist can error.
-        # A safer way is to check if it exists first.
+
         cursor.execute("SHOW COLUMNS FROM practice_questions_catalog LIKE 'teacher_id'")
         if cursor.fetchone():
-            # Need to drop FK first if it exists
+
             try:
                 cursor.execute("ALTER TABLE practice_questions_catalog DROP FOREIGN KEY fk_teacher_catalog")
                 print("Foreign key 'fk_teacher_catalog' dropped from 'practice_questions_catalog'.")
             except mysql.connector.Error as fk_err:
-                if fk_err.errno == 1091: # Can't DROP 'fk_teacher_catalog'; check that column/key exists
+                if fk_err.errno == 1091: 
                     print("Foreign key 'fk_teacher_catalog' not found or already dropped.")
                 else:
-                    raise # Re-raise other errors
+                    raise 
             cursor.execute("ALTER TABLE practice_questions_catalog DROP COLUMN teacher_id")
             print("Column 'teacher_id' dropped from 'practice_questions_catalog'.")
         else:
             print("Column 'teacher_id' does not exist in 'practice_questions_catalog', no action needed.")
 
 
-        # Ensure old concept tables are dropped
+        
         cursor.execute("DROP TABLE IF EXISTS practice_question_to_concept_linking;")
         print("Table 'practice_question_to_concept_linking' dropped if existed.")
         cursor.execute("DROP TABLE IF EXISTS question_concepts;")
@@ -164,23 +161,13 @@ def init_db():
         conn_to_db.close()
 
 def get_student_performance_for_assessment(db_conn, assessment_id: int) -> list:
-    """
-    Retrieves all student performance details for a specific assessment.
 
-    Args:
-        db_conn: Active MySQL database connection.
-        assessment_id (int): The ID of the assessment.
-
-    Returns:
-        list: A list of dictionaries, where each dictionary represents a student's answer
-              and evaluation details. Returns an empty list if no data or an error occurs.
-    """
     if not db_conn:
         print("No database connection provided to get_student_performance_for_assessment.")
         return []
 
     results = []
-    cursor = None  # Initialize cursor to None for finally block
+    cursor = None  
     try:
         cursor = db_conn.cursor(dictionary=True)
         sql = """
@@ -207,14 +194,14 @@ def get_student_performance_for_assessment(db_conn, assessment_id: int) -> list:
         results = cursor.fetchall()
         if not results:
             print(f"No performance data found for assessment_id: {assessment_id}")
-            return [] # Return empty list if no records found, which is not an error
+            return [] 
 
     except mysql.connector.Error as err:
         print(f"Error retrieving student performance for assessment_id {assessment_id}: {err}")
-        return [] # Return empty list on error
+        return [] 
     except Exception as e:
         print(f"An unexpected error occurred in get_student_performance_for_assessment: {e}")
-        return [] # Return empty list on unexpected error
+        return [] 
     finally:
         if cursor:
             cursor.close()
@@ -255,7 +242,7 @@ def save_assessment(db_conn, title, content, teacher_id=None):
         cursor.execute(sql, val)
         db_conn.commit()
         print(f"Assessment '{title}' (Teacher ID: {teacher_id}) saved successfully. Last inserted ID: {cursor.lastrowid}")
-        return cursor.lastrowid # Return the ID of the inserted row
+        return cursor.lastrowid 
     except mysql.connector.Error as err:
         print(f"Error saving assessment '{title}' (Teacher ID: {teacher_id}): {err}")
         db_conn.rollback()
@@ -270,7 +257,7 @@ def get_or_create_teacher(db_conn, teacher_name):
         cursor.execute("SELECT teacher_id FROM teachers WHERE teacher_name = %s", (teacher_name,))
         result = cursor.fetchone()
         if result:
-            return result[0] # teacher_id
+            return result[0] 
         else:
             cursor.execute("INSERT INTO teachers (teacher_name) VALUES (%s)", (teacher_name,))
             db_conn.commit()
@@ -287,11 +274,11 @@ def get_or_create_student(db_conn, student_name):
     if not db_conn: return None
     cursor = db_conn.cursor()
     try:
-        # Check if student exists
+        
         cursor.execute("SELECT student_id FROM students WHERE student_name = %s", (student_name,))
         result = cursor.fetchone()
         if result:
-            return result[0] # student_id
+            return result[0] 
         else:
             # Create student
             cursor.execute("INSERT INTO students (student_name) VALUES (%s)", (student_name,))
@@ -306,7 +293,7 @@ def get_or_create_student(db_conn, student_name):
         cursor.close()
 
 
-def save_practice_question_to_catalog(db_conn, question_text, question_type, model_answer, concepts_list=None): # Removed teacher_id from params
+def save_practice_question_to_catalog(db_conn, question_text,model_answer, concepts_list=None): 
     if not db_conn: return None
     cursor = db_conn.cursor()
     try:
@@ -316,15 +303,15 @@ def save_practice_question_to_catalog(db_conn, question_text, question_type, mod
             if valid_concepts:
                 concepts_covered_str = json.dumps(valid_concepts)
 
-        sql_question = "INSERT INTO practice_questions_catalog (question_text, question_type, model_answer, concepts_covered) VALUES (%s, %s, %s, %s)"
-        val_question = (question_text, question_type, model_answer, concepts_covered_str)
+        sql_question = "INSERT INTO practice_questions_catalog (question_text, model_answer, concepts_covered) VALUES (%s, %s, %s)"
+        val_question = (question_text,model_answer, concepts_covered_str)
         cursor.execute(sql_question, val_question)
         db_conn.commit()
         catalog_id = cursor.lastrowid
-        print(f"Practice question saved to catalog with ID: {catalog_id} (concepts: {concepts_covered_str})") # Updated print
+        print(f"Practice question saved to catalog with ID: {catalog_id} (concepts: {concepts_covered_str})") 
         return catalog_id
     except mysql.connector.Error as err:
-        print(f"Error in save_practice_question_to_catalog: {err}") # Updated print
+        print(f"Error in save_practice_question_to_catalog: {err}") 
         db_conn.rollback()
         return None
     finally:
@@ -349,28 +336,15 @@ def save_practice_attempt(db_conn, student_id, catalog_id, student_answer, corre
         cursor.close()
 
 def get_student_history_summary(db_conn, student_id, recent_attempts_limit=20, incorrect_focus_limit=5):
-    """
-    Retrieves and summarizes a student's practice history, focusing on concepts
-    from incorrectly or partially correctly answered questions.
 
-    Args:
-        db_conn: Active MySQL database connection.
-        student_id (int): The ID of the student.
-        recent_attempts_limit (int): How many recent attempts to consider.
-        incorrect_focus_limit (int): Max number of top struggled concepts to highlight.
-
-    Returns:
-        str: A summary string for the LLM, or a string indicating no specific issues found.
-    """
     if not db_conn:
         return "Could not retrieve practice history due to database connection issue."
 
-    cursor = db_conn.cursor(dictionary=True) # Use dictionary cursor for easier column access
+    cursor = db_conn.cursor(dictionary=True) 
     history_summary = ""
     
     try:
-        # Fetch recent attempts, prioritizing incorrect/partially correct ones
-        # We fetch more than incorrect_focus_limit initially to get a good sample of concepts
+
         sql = """
         SELECT pa.correctness_assessment, pqc.concepts_covered
         FROM practice_attempts pa
@@ -390,9 +364,9 @@ def get_student_history_summary(db_conn, student_id, recent_attempts_limit=20, i
         for attempt in attempts:
             if attempt['concepts_covered']:
                 try:
-                    # concepts_covered is stored as a JSON string list
+
                     concepts = json.loads(attempt['concepts_covered'])
-                    if isinstance(concepts, list): # Ensure it's a list
+                    if isinstance(concepts, list):
                         struggled_concepts.extend(concepts)
                 except json.JSONDecodeError:
                     print(f"Warning: Could not parse concepts_covered JSON: {attempt['concepts_covered']}")
@@ -412,7 +386,7 @@ def get_student_history_summary(db_conn, student_id, recent_attempts_limit=20, i
         
         history_summary = " ".join(summary_parts)
         
-        # Optional: Add info about correctly answered concepts if desired (more complex query)
+
 
     except mysql.connector.Error as err:
         print(f"Error retrieving student history: {err}")
@@ -426,20 +400,7 @@ def get_student_history_summary(db_conn, student_id, recent_attempts_limit=20, i
     return history_summary if history_summary else "No specific areas of difficulty noted in recent history."
 
 def get_assessment_question_stats(db_conn, assessment_id, question_identifier=None):
-    """
-    Retrieves performance statistics for questions in a given assessment.
 
-    Args:
-        db_conn: Active MySQL database connection.
-        assessment_id (int): The ID of the assessment to analyze.
-        question_identifier (str, optional): Specific question identifier to filter by.
-                                                If None, stats for all questions in the assessment.
-
-    Returns:
-        list: A list of dictionaries, where each dict contains stats for a question.
-              Example: [{'question_identifier': 'Q1', 'total_attempts': 10, 'correct': 5, ...}]
-              Returns an empty list if no data or an error occurs.
-    """
     if not db_conn:
         print("No database connection provided to get_assessment_question_stats.")
         return []
@@ -471,8 +432,7 @@ def get_assessment_question_stats(db_conn, assessment_id, question_identifier=No
             print(f"No student answers found for assessment ID {assessment_id}" + (f" and question '{question_identifier}'." if question_identifier else "."))
             return []
 
-        # Process raw_stats into a more structured list
-        # Group by question_identifier
+
         stats_by_question = {}
         for row in raw_stats:
             qid = row['question_identifier']
@@ -483,7 +443,7 @@ def get_assessment_question_stats(db_conn, assessment_id, question_identifier=No
                     'Correct': 0,
                     'Partially Correct': 0,
                     'Incorrect': 0,
-                    'Not Evaluated': 0 # Or other statuses
+                    'Not Evaluated': 0 
                 }
             status = row['llm_assessed_correctness']
             count = row['count']
@@ -504,7 +464,7 @@ def get_assessment_question_stats(db_conn, assessment_id, question_identifier=No
 
 def save_student_assessment_answer(db_conn, assessment_id, question_identifier, student_id, 
                                      student_answer_text, llm_evaluation_feedback, llm_assessed_correctness):
-    """Saves a student's answer and its LLM evaluation to the database."""
+
     if not db_conn:
         print("No database connection provided to save_student_assessment_answer.")
         return False
@@ -529,3 +489,51 @@ def save_student_assessment_answer(db_conn, assessment_id, question_identifier, 
         return False
     finally:
         cursor.close()
+
+def get_practice_question_details_by_id(db_conn: mysql.connector.connection.MySQLConnection, catalog_id: int) -> Optional[Dict[str, Any]]:
+    if not db_conn:
+        print("DB_UTILS ERROR: No database connection provided to get_practice_question_details_by_id.")
+        return None
+
+
+    result_dict = {}
+
+    try:
+
+        cursor = db_conn.cursor(dictionary=True)
+        
+
+        query = """
+            SELECT 
+                question_text, 
+                model_answer
+            FROM 
+                practice_questions_catalog 
+            WHERE 
+                catalog_id = %s
+        """
+        
+
+        cursor.execute(query, (catalog_id,))
+        
+
+        result = cursor.fetchone()
+        
+        if result:
+            print(f"DB_UTILS INFO: Successfully fetched details for practice question with catalog_id: {catalog_id}")
+
+            result_dict = result
+        else:
+            print(f"DB_UTILS WARNING: No practice question found with catalog_id: {catalog_id}")
+            return None 
+
+    except mysql.connector.Error as err:
+        print(f"DB_UTILS ERROR: Failed to fetch practice question details for catalog_id {catalog_id}. Error: {err}")
+
+        return None
+    finally:
+
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+            
+    return result_dict

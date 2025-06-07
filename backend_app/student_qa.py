@@ -3,23 +3,10 @@ from langchain_chroma import Chroma
 from langchain_community.chat_models import ChatZhipuAI # For LLM interaction
 from langchain_core.prompts import ChatPromptTemplate   # For LLM interaction
 from langchain_core.output_parsers import StrOutputParser # For LLM interaction
-# import sys # Only if sys.stdin.read() was planned, not for basic input()
+
 
 
 def search_knowledge_base_for_answer(student_question, embeddings_model_instance, vector_store_dir, top_k=10):
-    """
-    Performs a RAG search using the student's question against a Chroma vector store.
-
-    Args:
-        student_question (str): The student's question.
-        embeddings_model_instance: An initialized ZhipuAIEmbeddings instance.
-        vector_store_dir (str): The directory of the Chroma vector store.
-        top_k (int): The number of top documents to retrieve.
-
-    Returns:
-        list: A list of strings, where each string is the page_content of a retrieved document.
-              Returns an empty list if no documents are found or an error occurs.
-    """
     if not student_question:
         print("No question provided for RAG search.")
         return []
@@ -56,17 +43,6 @@ def search_knowledge_base_for_answer(student_question, embeddings_model_instance
         return []
 
 def construct_student_qa_prompt(student_question, rag_snippets):
-    """
-    Constructs the system and human messages for the student Q&A prompt.
-
-    Args:
-        student_question (str): The student's original question.
-        rag_snippets (list): A list of strings, where each string is a relevant snippet 
-                             from the knowledge base.
-
-    Returns:
-        dict: A dictionary containing "system_message" and "human_message".
-    """
 
     system_message = (
         "You are a helpful and friendly teaching assistant. Your primary role is to answer the student's "
@@ -97,17 +73,6 @@ def construct_student_qa_prompt(student_question, rag_snippets):
     }
 
 def get_llm_response_to_student(system_prompt, human_prompt):
-    """
-    Sends the prompt to the LLM and returns the response.
-
-    Args:
-        system_prompt (str): The system message for the LLM.
-        human_prompt (str): The human message for the LLM (containing question and context).
-        llm_api_key (str): The API key for the LLM.
-
-    Returns:
-        str: The LLM's response, or None if an error occurs.
-    """
     try:
         llm = ChatZhipuAI(temperature=0.3) # Lower temp for more factual Q&A
     except Exception as e:

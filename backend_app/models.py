@@ -7,7 +7,7 @@ class StudentPerformanceDetail(BaseModel):
     answer_id: int
     assessment_id: int
     student_id: int
-    student_name: Optional[str] = None # Requires join in DB query
+    student_name: Optional[str] = None 
     question_identifier: str
     student_answer_text: Optional[str] = None
     llm_evaluation_feedback: Optional[str] = None
@@ -17,7 +17,7 @@ class StudentPerformanceDetail(BaseModel):
 class StudentQuestionInput(BaseModel):
     question: str = Field(..., example="Explain the concept of photosynthesis.")
     student_id: Optional[int] = Field(None, example=123, description="Optional student ID for history tracking.")
-    # top_k_rag: Optional[int] = Field(3, example=3, description="Number of RAG snippets to retrieve.") # Keep it simple for now
+
 
 class StudentQuestionOutput(BaseModel):
     student_question: str
@@ -30,8 +30,6 @@ class TeachingPlanInput(BaseModel):
     teacher_name: Optional[str] = Field(None, example="Dr. Smith", description="Name of the teacher, to get/create teacher_id if ID not provided.")
     subject: str = Field(..., example="High School Biology")
     teaching_outline: str = Field(..., example="Week 1: Cell Structure, Week 2: Photosynthesis...")
-    # Assuming prompt_engineering details like RAG context for plan generation are handled by the service layer
-    # top_k_rag: Optional[int] = Field(3, example=3) # For RAG context to generate plan
     title_for_db: Optional[str] = Field(None, example="My Biology Q1 Plan", description="Optional title for saving the plan to the database.")
     style_tone: Optional[str] = Field(None, example="Engaging and interactive for 10th graders.")
     output_structure: Optional[str] = Field(
@@ -40,7 +38,7 @@ class TeachingPlanInput(BaseModel):
     )
 
 class TeachingPlanOutput(BaseModel):
-    teaching_plan_id: Optional[int] = None # If saved
+    teaching_plan_id: Optional[int] = None 
     title: str
     generated_plan_content: str
     teacher_id: Optional[int] = None
@@ -55,11 +53,10 @@ class AssessmentInput(BaseModel):
         example={"multiple-choice": 3, "short-answer": 2}
     )
     title_for_db: Optional[str] = Field(None, example="Photosynthesis Quiz Chapter 1", description="Optional title for saving the assessment to the database.")
-    # RAG for assessment generation is based on teaching_plan_content keywords, handled by service
 
 class AssessmentOutput(BaseModel):
-    assessment_id: Optional[int] = None # If saved
-    title: Optional[str] = None # Title might be requested from user before saving
+    assessment_id: Optional[int] = None 
+    title: Optional[str] = None 
     generated_assessment_content: str
     teacher_id: Optional[int] = None
     error_message: Optional[str] = None
@@ -70,12 +67,11 @@ class StudentAssessmentAnswerItem(BaseModel):
 
 class StudentAssessmentInput(BaseModel):
     student_id: Optional[int] = Field(None, example=123)
-    student_name: str = Field(..., example="John Doe") # Used if student_id is not provided
     assessment_id: int = Field(..., example=1)
     answers: List[StudentAssessmentAnswerItem]
 
-class StudentAssessmentEvaluationOutput(BaseModel): # Renamed for clarity
-    answer_id: Optional[int] = None # If saved
+class StudentAssessmentEvaluationOutput(BaseModel): 
+    answer_id: Optional[int] = None 
     assessment_id: int
     question_identifier: str
     student_id: int
@@ -85,35 +81,32 @@ class StudentAssessmentEvaluationOutput(BaseModel): # Renamed for clarity
     error_message: Optional[str] = None
 
 class PracticeQuestionsInput(BaseModel):
-    student_id: Optional[int] = Field(None, example=123) # For history-based personalization
-    student_name: Optional[str] = Field(None, example="Alice") # For history-based personalization if ID not known
+    student_id: Optional[int] = Field(None, example=123) 
     practice_topic: str = Field(..., example="Python list comprehensions")
     question_preferences: Dict[str, int] = Field(
         default_factory=lambda: {"multiple-choice": 1, "short-answer": 1, "programming": 1},
         example={"programming": 2, "short-answer": 1}
     )
-    # RAG and history summary are fetched by the service layer
+    
 
-class PracticeQuestionItem(BaseModel): # For individual Q&A pairs
-    catalog_id: Optional[int] = None # If saved to catalog
-    question_type: str
-    question_text: str # Renamed from 'question' for clarity vs. student's question
+class PracticeQuestionItem(BaseModel): 
+    catalog_id: Optional[int] = None 
+    question_text: str 
     model_answer: str
 
 class PracticeQuestionsOutput(BaseModel):
     generated_questions: List[PracticeQuestionItem]
+    catalog_id: Optional[int] = None
     error_message: Optional[str] = None
 
 class PracticeFeedbackInput(BaseModel):
     student_id: int = Field(..., example=123)
-    catalog_id: int = Field(..., example=101) # ID of the question from practice_questions_catalog
-    question_text: str # The actual question text
-    model_answer: str # The model answer
+    catalog_id: int = Field(..., example=101) 
     student_answer: str
-    question_type: str = Field(..., example="Programming")
+
 
 class PracticeFeedbackOutput(BaseModel):
-    attempt_id: Optional[int] = None # If attempt saved
+    attempt_id: Optional[int] = None 
     correctness_assessment: str
     detailed_feedback: str
     error_message: Optional[str] = None
@@ -125,7 +118,7 @@ class TeachingPlanNLInput(BaseModel):
 class PracticeQuestionNLInput(BaseModel):
     query: str = Field(..., example="Generate some python list comprehension questions, maybe 2 multiple choice and 1 programming.")
     student_id: Optional[int] = Field(None, description="Optional student ID for history personalization.")
-    student_name: Optional[str] = Field(None, description="Optional student name if ID is not known.")
+
 
 class AssessmentNLInput(BaseModel):
     query: str = Field(..., example="Generate an assessment for Prof. Oak based on the Kanto region Pokedex, Gym Leaders, and Elite Four. Include 2 multiple-choice and 1 short-answer. Title it 'Kanto Basics Quiz'.")
@@ -134,21 +127,9 @@ class AssessmentNLInput(BaseModel):
 class StudentAssessmentNLInput(BaseModel):
     query: str = Field(..., example="For assessment 12, student John Doe (id 77) answered: Q1 was 'Paris', Section B Q2 was 'The mitochondria is the powerhouse of the cell'.")
     student_id: Optional[int] = Field(None, description="Student ID, if known and can be extracted or provided separately.")
-    student_name: Optional[str] = Field(None, description="Student Name. If not provided here, LLM will attempt to extract from query. Service requires a name.")
     assessment_id: int = Field(..., description="ID of the assessment being evaluated.")
 
-class PracticeFeedbackNLInput(BaseModel):
-    student_query_answer: str = Field(..., example="I think the answer is 'list comprehension'.")
-    student_id: int = Field(..., example=123)
-    catalog_id: int = Field(..., example=101)
-    question_text: str = Field(..., example="What Python feature allows creating lists based on existing lists in a concise way?")
-    model_answer: str = Field(..., example="List comprehension") # Corrected from model_answer_text in original prompt for consistency with PracticeFeedbackInput
-    question_type: str = Field(..., example="Short-Answer")
 
-# --- NLP Unified Query Models --- # REMOVED
-# class NaturalLanguageQueryInput(BaseModel): ...
-# class NLQueryResponse(BaseModel): ...
 
-# Generic message model for simple status updates or errors not fitting other models
 class Message(BaseModel):
     message: str
