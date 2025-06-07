@@ -1,12 +1,11 @@
+import os 
 from typing import Any, Dict, Optional
 import mysql.connector
+from mysql.connector import Error 
 import json 
 from collections import Counter
 
 def get_mysql_connection(db_name=None):
-    """Establishes a connection to the MySQL server.
-    Connects to a specific database if db_name is provided, otherwise connects to the server.
-    """
     try:
         host = "localhost"
         user = "root"
@@ -537,3 +536,120 @@ def get_practice_question_details_by_id(db_conn: mysql.connector.connection.MySQ
             cursor.close()
             
     return result_dict
+
+async def get_student_for_auth(student_name: str) -> Optional[Dict[str, Any]]:
+    # '''Fetches student details for authentication from the students table.'''
+    db_conn = None
+    MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+    try:
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if db_conn is None:
+            print(f"DB ERROR: Failed to connect to database for get_student_for_auth (student: {student_name}).")
+            return None
+        
+        cursor = db_conn.cursor(dictionary=True)
+        # Assumes student_name is the unique identifier for login, and you've added hashed_password
+        query = "SELECT student_id, student_name, hashed_password FROM students WHERE student_name = %s"
+        cursor.execute(query, (student_name,))
+        student_record = cursor.fetchone()
+        
+        if student_record:
+            return student_record # Contains student_id, student_name, hashed_password
+        return None
+    except Error as e:
+        print(f"DB ERROR: Error fetching student {student_name} for auth: {e}")
+        return None
+    finally:
+        if db_conn and db_conn.is_connected():
+            if 'cursor' in locals() and cursor: # ensure cursor exists
+                cursor.close()
+            db_conn.close()
+
+
+async def save_student_registration(student_name: str, hashed_password: str) -> Optional[Dict[str, Any]]:
+    db_conn = None
+    MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+    try:
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if db_conn is None:
+            print(f"DB ERROR: Failed to connect to database for save_student_registration (student: {student_name}).")
+            return None
+
+        cursor = db_conn.cursor()
+        # Assumes student_name is unique. If it can conflict, an explicit check or error handling for unique constraint is needed.
+        # This also assumes you have added `hashed_password` column to `students` table.
+        query = "INSERT INTO students (student_name, hashed_password) VALUES (%s, %s)"
+        values = (student_name, hashed_password)
+        cursor.execute(query, values)
+        db_conn.commit()
+        
+        if cursor.lastrowid:
+            return {"student_id": cursor.lastrowid, "student_name": student_name}
+        return None
+    except Error as e:
+        print(f"DB ERROR: Error saving student registration for {student_name}: {e}")
+        if db_conn: # Check if db_conn was successfully assigned
+            db_conn.rollback()
+        return None
+    finally:
+        if db_conn and db_conn.is_connected():
+            if 'cursor' in locals() and cursor: # ensure cursor exists
+                cursor.close()
+            db_conn.close()
+
+async def get_teacher_for_auth(teacher_name: str) -> Optional[Dict[str, Any]]:
+    db_conn = None
+    MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+    try:
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if db_conn is None:
+            print(f"DB ERROR: Failed to connect to database for get_teacher_for_auth (teacher: {teacher_name}).")
+            return None
+        
+        cursor = db_conn.cursor(dictionary=True)
+        query = "SELECT teacher_id, teacher_name, hashed_password FROM teachers WHERE teacher_name = %s"
+        cursor.execute(query, (teacher_name,))
+        teacher_record = cursor.fetchone()
+        
+        if teacher_record:
+            return teacher_record 
+        return None
+    except Error as e:
+        print(f"DB ERROR: Error fetching teacher {teacher_name} for auth: {e}")
+        return None
+    finally:
+        if db_conn and db_conn.is_connected():
+            if 'cursor' in locals() and cursor: # ensure cursor exists
+                cursor.close()
+            db_conn.close()
+
+async def save_teacher_registration(teacher_name: str, hashed_password: str) -> Optional[Dict[str, Any]]:
+    db_conn = None
+    MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+
+
+    try:
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if db_conn is None:
+            print(f"DB ERROR: Failed to connect to database for save_teacher_registration (teacher: {teacher_name}).")
+            return None
+
+        cursor = db_conn.cursor()
+        query = "INSERT INTO teachers (teacher_name, hashed_password) VALUES (%s, %s)"
+        values = (teacher_name, hashed_password)
+        cursor.execute(query, values)
+        db_conn.commit()
+        
+        if cursor.lastrowid:
+            return {"teacher_id": cursor.lastrowid, "teacher_name": teacher_name}
+        return None
+    except Error as e:
+        print(f"DB ERROR: Error saving teacher registration for {teacher_name}: {e}")
+        if db_conn: 
+            db_conn.rollback()
+        return None
+    finally:
+        if db_conn and db_conn.is_connected():
+            if 'cursor' in locals() and cursor: 
+                cursor.close()
+            db_conn.close()

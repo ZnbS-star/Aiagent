@@ -133,3 +133,26 @@ class StudentAssessmentNLInput(BaseModel):
 
 class Message(BaseModel):
     message: str
+
+class UserBase(BaseModel):
+    username: str = Field(..., example="john_doe")
+
+class UserCreate(UserBase):
+    username: str = Field(..., example="john_doe")
+    password: str = Field(..., example="securepassword123")
+    role: Optional[str] = Field(None, example="student") # student or teacher
+
+class UserLogin(BaseModel):
+    username: str = Field(..., example="john_doe")
+    password: str = Field(..., example="securepassword123")
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+    class Config:
+        orm_mode = True 
