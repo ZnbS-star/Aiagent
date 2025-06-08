@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter,  HTTPException, Body
 from backend_app.auth_service import unified_register_service, unified_login_service
 from backend_app.models import (
@@ -7,7 +8,8 @@ from backend_app.models import (
     StudentAssessmentInput, StudentAssessmentNLInput,  StudentAssessmentAnswerItem, 
     PracticeQuestionsInput, PracticeQuestionNLInput, PracticeQuestionsOutput, 
     PracticeFeedbackInput,  PracticeFeedbackOutput, 
-    Message, StudentPerformanceDetail, Token, UserCreate, UserLogin 
+    Message, StudentPerformanceDetail, Token, UserCreate, UserLogin,
+    RefineStudentQAInput, RefineTeachingPlanInput, RefineAssessmentInput
 )
 from backend_app.services import (
     process_student_question_service, 
@@ -16,7 +18,10 @@ from backend_app.services import (
     evaluate_student_assessment_answers_service,
     get_student_assessment_performance_service, 
     generate_practice_questions_service,
-    get_practice_feedback_service
+    get_practice_feedback_service,
+    refine_assessment_service,
+    refine_student_question_service,
+    refine_teaching_plan_service
 )
 from backend_app.nlp_utils import parse_query_with_llm 
 from typing import List
@@ -40,7 +45,7 @@ async def login_teacher_endpoint(form_data: UserLogin):
 
 
 @router.post(
-    "/student-qa/", 
+    "/student-qa", 
     response_model=StudentQuestionOutput, 
     summary="Process a student's question using RAG and LLM",
     description="Receives a student's question, optionally a student ID. "
@@ -78,8 +83,36 @@ async def student_question_answer(input_data: StudentQuestionInput = Body(..., e
         print(f"API ERROR: An unexpected error occurred in /student-qa/ endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
+
 @router.post(
-    "/teaching-plans/generate-initial/",
+    "/student-qa/refine",
+    response_model=StudentQuestionOutput,
+    summary="Refine a student's question based on conversation history",
+    description="Receives conversation history and a new query to refine and regenerate an answer.",
+    responses={
+        200: {"description": "Successful response with the refined LLM's answer."},
+        400: {"model": Message, "description": "Bad Request (e.g., empty history or new_query)"},
+        500: {"model": Message, "description": "Internal Server Error"}
+    }
+)
+async def refine_student_question(input_data: RefineStudentQAInput = Body(...)):
+    if not input_data.history:
+        raise HTTPException(status_code=400, detail="History cannot be empty.")
+    if not input_data.new_query or not input_data.new_query.strip():
+        raise HTTPException(status_code=400, detail="New query cannot be empty.")
+
+    try:
+        result = await refine_student_question_service(input_data) 
+        return result 
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"API ERROR: An unexpected error occurred in /student-qa/refine endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+
+@router.post(
+    "/teaching-plans",
     response_model=TeachingPlanOutput,
     summary="Generate and Save Initial Teaching Plan from Natural Language Query",
     description="Accepts a natural language query to generate a first draft of a teaching plan using an LLM "
@@ -97,20 +130,20 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
 
 
     FULL_PROMPT_FOR_LLM = f"""
-请分析以下用户查询，并从中提取特定信息。
+    请分析以下用户查询，并从中提取特定信息。
 
---- 用户查询开始 ---
-{input_data.query}
-    --- 用户查询结束 ---
+    --- 用户查询开始 ---
+    {input_data.query}
+        --- 用户查询结束 ---
 
-    你的任务是根据上述查询，提取以下实体：
-    1.  "teaching_outline"（字符串，必填）：用户明确要求的核心教学主题。例如 "TensorFlow.js编程"。
-    2.  "style_tone"（字符串，可选）：教案的特定风格或语气。如果用户未提及，则此字段应为 null。
-    3.  "output_structure"（字符串，可选）：所需的输出结构。如果用户未提及，则此字段应为 null。
-    4.  "title_for_db"（字符串，可选）：用于保存教案的特定标题。如果用户未指定，请基于 `teaching_outline` 生成一个简洁的标题。
+        你的任务是根据上述查询，提取以下实体：
+        1.  "teaching_outline"（字符串，必填）：用户明确要求的核心教学主题。例如 "TensorFlow.js编程"。
+        2.  "style_tone"（字符串，可选）：教案的特定风格或语气。如果用户未提及，则此字段应为 null。
+        3.  "output_structure"（字符串，可选）：所需的输出结构。如果用户未提及，则此字段应为 null。
+        4.  "title_for_db"（字符串，可选）：用于保存教案的特定标题。如果用户未指定，请基于 `teaching_outline` 生成一个简洁的标题。
 
-    你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
-"""
+        你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
+    """
     parsed_entities_dict = await parse_query_with_llm(FULL_PROMPT_FOR_LLM)
 
     if "error" in parsed_entities_dict:
@@ -128,13 +161,9 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
             style_tone=style_tone,
             output_structure=output_structure
         )
-
         if not generated_content:
             raise HTTPException(status_code=500, detail="Failed to generate teaching plan content from LLM service. Check service logs.")
-
-
         title_to_save = title_for_db 
-        
         MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
         if not MYSQL_DB_NAME:
             print("API WARNING: MYSQL_DB environment variable not set. Cannot save teaching plan.")
@@ -143,7 +172,6 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
                 generated_plan_content=generated_content,
                 error_message="Plan generated but not saved; MYSQL_DB not configured."
             )
-
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
         if not db_conn:
             print("API ERROR: Failed to connect to the database for saving teaching plan.")
@@ -152,14 +180,12 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
                 generated_plan_content=generated_content,
                 error_message="Plan generated but failed to connect to DB for saving."
             )
-        
         plan_id = save_teaching_plan(
             db_conn,
             title_to_save,
             generated_content,
             final_teacher_id 
         )
-
         if plan_id:
             return TeachingPlanOutput(
                 teaching_plan_id=plan_id,
@@ -173,7 +199,6 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
                 generated_plan_content=generated_content,
                 error_message="Plan generated but failed to save to database. Check server logs."
             )
-            
     except HTTPException as he: 
         raise he
     except Exception as e:
@@ -185,8 +210,69 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
             db_conn.close()
 
 
+
 @router.post(
-    "/assessments/generate/",
+    "/teaching-plans/refine",
+    response_model=TeachingPlanOutput,
+    summary="Refine a teaching plan based on conversation history",
+    description="Receives conversation history and a new query to refine an existing teaching plan.",
+    responses={
+        200: {"description": "Teaching plan refined successfully."},
+        400: {"model": Message, "description": "Bad Request (e.g., empty history or new_query)"},
+        500: {"model": Message, "description": "Internal Server Error"}
+    }
+)
+async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
+    db_conn = None
+    try:
+        full_generated_content, rag = await refine_teaching_plan_service(input_data)
+
+        if not full_generated_content:
+            raise HTTPException(status_code=500, detail="Failed to generate refined teaching plan content.")
+        new_title = f"Refined Plan (based on ID {input_data.base_teaching_plan_id}) - {datetime.now().strftime('%H%M%S')}"
+
+        MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not db_conn:
+            # 即使无法保存，也应该返回生成的内容，让用户可以复制
+            return TeachingPlanOutput(
+                title=new_title,
+                generated_plan_content=full_generated_content,
+                teacher_id=input_data.teacher_id,
+                error_message="Content generated but failed to connect to DB for saving."
+            )
+
+        # 调用保存函数，存入一个新的记录
+        new_plan_id = save_teaching_plan(
+            db_conn,
+            new_title,
+            full_generated_content,
+            input_data.teacher_id
+        )
+
+        # 3. 返回新副本的信息
+        if new_plan_id:
+            return TeachingPlanOutput(
+                teaching_plan_id=new_plan_id, # 返回【新】的ID
+                title=new_title,
+                generated_plan_content=full_generated_content,
+                teacher_id=input_data.teacher_id
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Content generated but failed to save the new version to the database.")
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"API ERROR: An unexpected error occurred in /teaching-plans/refine endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+
+
+@router.post(
+    "/assessments/generate",
     response_model=AssessmentOutput,
     summary="Generate and Save an Assessment from Natural Language Query",
     description="Accepts a natural language query to generate an assessment. Uses an LLM to extract "
@@ -203,8 +289,6 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
 
     if not input_data.query or not input_data.query.strip():
         raise HTTPException(status_code=400, detail="查询内容不能为空。")
-
-    # 1. 构建一个包含了所有指令和用户查询的、完整的中文用户提示 (User Prompt)
     FULL_PROMPT_FOR_ASSESSMENT_NLP = f"""
     请分析以下用户查询，该查询旨在生成一份考核。你的任务是从中提取特定信息。
 
@@ -214,7 +298,7 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
 
     你需要根据上述查询，提取以下实体：
     1.  "teaching_plan_content" (字符串, 必填): 考核应涵盖的核心内容、主题或材料摘要。例如："一战的起因"、"宝可梦关都地区的图鉴、道馆馆主和四天王"。
-    2.  "question_preferences" (对象, 可选): 一个指定所需问题类型和数量的字典。例如：{{"选择题": 3, "简答题": 2}}。如果用户没有明确指定数量和类型，请返回 null。
+    2.  "question_preferences" (对象, 可选): 一个指定所需问题类型和数量的字典。例如：{{"选择题": 3, "简答题": 2}}。如果用户没有明确指定数量和类型，请返回任意数量和类型。
     3.  "title_for_db" (字符串, 可选): 用于保存考核的特定标题。如果用户未指定，请返回 null。
 
     你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
@@ -291,8 +375,76 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
         if db_conn and db_conn.is_connected():
             db_conn.close()
 
+
 @router.post(
-    "/student-assessments/evaluate-answers/",
+    "/assessments/refine",
+    response_model=AssessmentOutput,
+    summary="Refine an assessment based on conversation history",
+    description="Receives conversation history and a new query to refine an existing assessment.",
+    responses={
+        200: {"description": "Assessment refined successfully."},
+        400: {"model": Message, "description": "Bad Request (e.g., empty history or new_query)"},
+        500: {"model": Message, "description": "Internal Server Error"}
+    }
+)
+async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
+    if not input_data.history or not input_data.new_query:
+        raise HTTPException(status_code=400, detail="History and new_query are required.")
+
+    db_conn = None
+    try:
+        # 1. 调用服务，并解构返回的元组
+        full_generated_content,_= await refine_assessment_service(input_data)
+
+        # 2. 检查服务是否成功生成内容
+        if not full_generated_content:
+            raise HTTPException(status_code=500, detail="Failed to generate refined assessment content.")
+
+        # 3. 保存新副本到数据库
+        new_title = f"Refined Assessment (based on ID {input_data.base_assessment_id}) - {datetime.now().strftime('%H%M%S')}"
+        
+        MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not db_conn:
+            # 返回内容，但提示保存失败
+            return AssessmentOutput(
+                title=new_title,
+                generated_assessment_content=full_generated_content,
+                teacher_id=input_data.teacher_id,
+                error_message="Content generated but failed to connect to DB for saving."
+            )
+
+        new_assessment_id = save_assessment(
+            db_conn,
+            new_title,
+            full_generated_content,
+            input_data.teacher_id
+            # 如果需要 subject, 这里也要处理
+        )
+
+        # 4. 构造并返回正确的 Pydantic 模型实例
+        if new_assessment_id:
+            return AssessmentOutput(
+                assessment_id=new_assessment_id,
+                title=new_title,
+                generated_assessment_content=full_generated_content,
+                teacher_id=input_data.teacher_id
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Content generated but failed to save the new version.")
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"API ERROR: An unexpected error occurred in /assessments/refine endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+
+
+@router.post(
+    "/student-assessments/evaluate-answers",
     response_model=Message, 
     summary="Evaluate Student's Assessment Answers from Natural Language Query",
     description="Accepts a natural language query detailing a student's answers to an assessment. "
@@ -389,7 +541,7 @@ async def evaluate_student_answers(input_data: StudentAssessmentNLInput ):
 
 
 @router.post(
-    "/practice-questions/generate/",
+    "/practice-questions/generate",
     response_model=PracticeQuestionsOutput,
     summary="Generate Practice Questions from Natural Language Query",
     description="Accepts a natural language query to generate practice questions. Uses an LLM to extract "
@@ -473,7 +625,7 @@ async def generate_practice_questions_endpoint(input_data: PracticeQuestionNLInp
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
 @router.post(
-    "/practice-questions/feedback/",
+    "/practice-questions/feedback",
     response_model=PracticeFeedbackOutput,
     summary="Get Feedback on a Student's Natural Language Answer to a Practice Question",
     description="Submits a student's natural language answer (`student_query_answer`) to a specific practice question, "

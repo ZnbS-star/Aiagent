@@ -13,9 +13,8 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "supersecretpassword")
 
 
 async def unified_register_service(user_data: UserCreate) -> Dict[str, Any]:
-    role = user_data.role.lower() # 转换为小写以增加容错性
     hashed_password = get_password_hash(user_data.password)
-    if role ==3:
+    if user_data.role ==3:
         existing_teacher = await get_teacher_for_auth(user_data.username)
         if existing_teacher:
             raise HTTPException(
@@ -29,7 +28,7 @@ async def unified_register_service(user_data: UserCreate) -> Dict[str, Any]:
             detail="创建教师账户失败。",
         )
         return {"teacher_id": new_teacher["teacher_id"], "teacher_name": new_teacher["teacher_name"]}
-    elif role == 2:
+    elif user_data.role == 2:
         existing_student = await get_student_for_auth(user_data.username)
         if existing_student:
             raise HTTPException(
@@ -43,7 +42,7 @@ async def unified_register_service(user_data: UserCreate) -> Dict[str, Any]:
             detail="创建教师账户失败。",
         )
         return {"student_id": new_student["teacher_id"], "student_name": new_student["teacher_name"]}
-    elif role == 1:
+    elif user_data.role == 1:
         # 管理员不能通过此接口注册
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -56,10 +55,8 @@ async def unified_register_service(user_data: UserCreate) -> Dict[str, Any]:
         )
 
 async def unified_login_service(form_data: UserLogin) -> Token:
-
-    role = form_data.role.lower()
     
-    if role == 3:
+    if form_data.role == 3:
         teacher = await get_teacher_for_auth(form_data.username)
         if not teacher or not verify_password(form_data.password, teacher["hashed_password"]):
             raise HTTPException(
@@ -73,7 +70,7 @@ async def unified_login_service(form_data: UserLogin) -> Token:
         data={"sub": teacher["teacher_name"], "role": "teacher"}
     )
         return Token(access_token=access_token, token_type="bearer")
-    elif role == 2:
+    elif form_data.role == 2:
         student = await get_student_for_auth(form_data.username)
         if not student or not verify_password(form_data.password, student["hashed_password"]):
             raise HTTPException(
@@ -86,7 +83,7 @@ async def unified_login_service(form_data: UserLogin) -> Token:
         data={"sub": student["student_name"], "role": "student"}
     )
         return Token(access_token=access_token, token_type="bearer")
-    elif role == 1:
+    elif form_data.role == 1:
         if form_data.username != ADMIN_USERNAME or form_data.password != ADMIN_PASSWORD:
             raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

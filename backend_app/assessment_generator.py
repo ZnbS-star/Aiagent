@@ -1,8 +1,8 @@
-
 from langchain_community.chat_models.tongyi import ChatTongyi
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_chroma import Chroma         
+from langchain_chroma import Chroma
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage # Added
+from typing import List # To use List type hint
 
 
 def perform_rag_search(keywords_list, embeddings_model_instance, vector_store_dir, top_k=10):
@@ -73,7 +73,8 @@ def construct_assessment_prompt(teaching_plan_content, retrieved_rag_snippets, q
         "human_message": human_message_content
     }
 
-def generate_assessment_with_llm(system_prompt, human_prompt):
+# Accepts a list of Langchain message objects
+def generate_assessment_with_llm(messages: list):
     try:
         # Assuming DASHSCOPE_API_KEY is in the environment
         llm = ChatTongyi(temperature=0.7)
@@ -81,23 +82,42 @@ def generate_assessment_with_llm(system_prompt, human_prompt):
         print(f"Error initializing LLM (ChatTongyi). Ensure DASHSCOPE_API_KEY is set correctly. Details: {e}")
         return None
 
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", "{system_message_var}"),
-        ("human", "{human_message_var}")
-    ])
+    # The LLM can directly take a list of message objects
     output_parser = StrOutputParser()
-    chain = prompt_template | llm | output_parser
+    chain = llm | output_parser # Simpler chain
 
     print("\nSending request to LLM for assessment generation...")
     try:
-        response = chain.invoke({
-            "system_message_var": system_prompt,
-            "human_message_var": human_prompt
-        })
+        # The 'messages' parameter should be a list of Langchain HumanMessage, AIMessage, SystemMessage objects
+        response = chain.invoke(messages) # Pass the list of messages directly
         return response
     except Exception as e:
         print(f"An error occurred during LLM interaction: {e}")
         return None
 
+def construct_assessment_prompt_with_history(
+    history: List, # List of Langchain HumanMessage, AIMessage, SystemMessage
+    new_query:str,
+    rag_snippets: List[str],
+    user_intent:str
+) -> List:
+    if user_intent == "REWRITE":
+        system_prompt = "根据用户的最新指令，生成一份【全新】的考核试卷。请忽略所有历史和原始试卷内容。"
+    elif user_intent == "REVISION" or user_intent == "STYLE_CHANGE":
+        system_prompt = "根据原始试卷和用户的最新指令，生成一份【修改后】的【完整】考核试卷。你的输出应该是替换掉整个旧试卷的新版本。"
+    else: # INCREMENTAL_ADD 或 UNKNOWN
+        system_prompt = "根据原始试卷和用户的最新指令，【只生成需要新增或修改】的那部分内容。不要重复原始试卷中未被修改的部分。"
+    final_messages_for_llm = [SystemMessage(content=system_prompt)]
+    final_messages_for_llm.extend(history)
+    final_messages_for_llm.extend(new_query)
 
+    if rag_snippets:
+        rag_context_str = "\n--- Relevant Context from Knowledge Base ---\n"
+        for i, snippet in enumerate(rag_snippets):
+            rag_context_str += f"[Snippet {i+1}]: {snippet}\n"
+        rag_context_str += "--- End of Context ---"
+        
+        # Add RAG context as a new HumanMessage
+        final_messages_for_llm.append(HumanMessage(content=rag_context_str))
 
+    return final_messages_for_llm

@@ -157,3 +157,26 @@ class Token(BaseModel):
 
     class Config:
         orm_mode = True 
+
+
+class ChatMessage(BaseModel):
+    role: str  # e.g., "user", "assistant", "system"
+    content: str
+
+class RefineStudentQAInput(BaseModel):
+    
+    history: List[ChatMessage]
+    new_query: str
+    student_id: Optional[int] = None
+
+class RefineTeachingPlanInput(BaseModel):
+    base_teaching_plan_id: Optional[int] = Field(None, description="The ID of the teaching plan being refined. If null, a new plan will be created based on history.")
+    history: List[ChatMessage]
+    new_query: str
+    teacher_id: Optional[int] = None
+
+class RefineAssessmentInput(BaseModel):
+    base_assessment_id: Optional[int] = Field(None, description="The ID of the assessment being refined. If null, a new assessment will be created based on history.")
+    history: List[ChatMessage]
+    new_query: str
+    teacher_id: Optional[int] = None

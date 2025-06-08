@@ -653,3 +653,24 @@ async def save_teacher_registration(teacher_name: str, hashed_password: str) -> 
             if 'cursor' in locals() and cursor: 
                 cursor.close()
             db_conn.close()
+
+def get_teaching_plan_by_id(db_conn, plan_id: int) -> Optional[dict]:
+    """Retrieves a single teaching plan by its ID."""
+    if not db_conn or not plan_id:
+        return None
+    
+    cursor = db_conn.cursor(dictionary=True) # 使用字典游标，方便按列名获取
+    try:
+        cursor.execute("SELECT * FROM teaching_plans WHERE id = %s", (plan_id,))
+        plan = cursor.fetchone()
+        if plan:
+            print(f"Successfully retrieved teaching plan with ID: {plan_id}")
+            return plan
+        else:
+            print(f"No teaching plan found with ID: {plan_id}")
+            return None
+    except mysql.connector.Error as err:
+        print(f"Error retrieving teaching plan with ID {plan_id}: {err}")
+        return None
+    finally:
+        cursor.close()
