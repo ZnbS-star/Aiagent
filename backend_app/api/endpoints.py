@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
-from backend_app.auth_service import login_admin_service, login_student_service, login_teacher_service, register_student_service, register_teacher_service
+from fastapi import APIRouter,  HTTPException, Body
+from backend_app.auth_service import unified_register_service, unified_login_service
 from backend_app.models import (
     StudentQuestionInput, StudentQuestionOutput, 
     TeachingPlanNLInput, TeachingPlanOutput, 
@@ -25,34 +25,19 @@ from backend_app.database_utils import get_mysql_connection, save_teaching_plan,
 
 router = APIRouter()
 
-@router.post("/teachers/register", summary="教师注册")
-async def register_teacher_endpoint(user_data: UserCreate):
-    new_teacher = await register_teacher_service(user_data)
-    return new_teacher
+@router.post("register", summary="注册")
+async def unified_register_endpoint(user_data: UserCreate):
 
-@router.post("/teachers/login", response_model=Token, summary="教师登录 (接受JSON)")
-async def login_teacher_endpoint(form_data: UserLogin): # 直接使用你的 Pydantic 模型 UserLogin
+    new_user = await unified_register_service(user_data)
+    return new_user
 
-    token = await login_teacher_service(form_data)
-    return token
+@router.post("/login", response_model=Token, summary="登录 ")
+async def login_teacher_endpoint(form_data: UserLogin): 
 
-@router.post("/students/login", response_model=Token, summary="学生登录 (接受JSON)")
-async def login_student_endpoint(form_data: UserLogin): # 直接使用 UserLogin 模型
-    token = await login_student_service(form_data)
+    token = await unified_login_service(form_data)
     return token
 
 
-@router.post("/students/register", summary="学生注册")
-async def register_student_endpoint(user_data: UserCreate):
-    new_student = await register_student_service(user_data)
-    return new_student
-
-@router.post("/admin/login", response_model=Token, summary="管理员登录")
-async def login_admin_endpoint(form_data: UserLogin):
-    # 同样使用 OAuth2PasswordRequestForm
-    user_login_data = UserLogin(username=form_data.username, password=form_data.password)
-    token = await login_admin_service(user_login_data)
-    return token
 
 @router.post(
     "/student-qa/", 

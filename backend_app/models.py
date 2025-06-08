@@ -140,11 +140,12 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     username: str = Field(..., example="john_doe")
     password: str = Field(..., example="securepassword123")
-    role: Optional[str] = Field(None, example="student") # student or teacher
+    role: int
 
 class UserLogin(BaseModel):
     username: str = Field(..., example="john_doe")
     password: str = Field(..., example="securepassword123")
+    role: int
 
 class TokenData(BaseModel):
     username: Optional[str] = None
