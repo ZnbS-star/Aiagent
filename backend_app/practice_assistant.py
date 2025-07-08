@@ -246,7 +246,6 @@ def parse_questions_and_answers(llm_response_str):
 
     if not parsed_qa_pairs and llm_response_str.strip(): 
         print("Warning: Could not parse any Q&A pairs from LLM response using regex. LLM output might not conform to expected format. Displaying raw output as a fallback can be implemented if desired.")
-
         pass
 
     return parsed_qa_pairs

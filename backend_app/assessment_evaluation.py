@@ -16,20 +16,46 @@ from langchain_chroma import Chroma         # For RAG
 
 
 def get_assessment_content_by_id(db_conn, assessment_id):
+
     if not db_conn:
         print("No database connection provided to get_assessment_content_by_id.")
         return None
     
-    cursor = db_conn.cursor(dictionary=True) # Use dictionary cursor
+    cursor = db_conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT id, title, content, teacher_id, created_at FROM assessments WHERE id = %s", (assessment_id,))
+        # --- 关键修改：查询新的列 ---
+        sql_query = """
+            SELECT 
+                id, title, teacher_id, created_at,
+                questions_text, 
+                answers_text ,
+                subject
+            FROM assessments 
+            WHERE id = %s
+        """
+        cursor.execute(sql_query, (assessment_id,))
         assessment_data = cursor.fetchone()
+        
         if assessment_data:
+            # --- 关键修改：在内存中重构完整的'content' ---
+            # 评估模块需要一个包含问题和标准答案的完整上下文
+            questions = assessment_data.get('questions_text', '')
+            answers = assessment_data.get('answers_text', '')
+            
+            # 仿照我们之前约定的格式，将问题和答案拼接起来
+            # 这为评估LLM提供了它所期望的完整输入格式
+            assessment_data['content'] = f"{questions}\n\n---参考答案与解析---\n\n{answers}"
+            
+            # （可选）可以删除原始字段，避免混淆
+            # del assessment_data['questions_text']
+            # del assessment_data['answers_text']
+
             return assessment_data
         else:
             print(f"No assessment found with ID: {assessment_id}")
             return None
     except mysql.connector.Error as err:
+        # 错误日志保持不变，但现在应该能正确执行了
         print(f"Error retrieving assessment with ID {assessment_id}: {err}")
         return None
     except Exception as e:
@@ -98,7 +124,7 @@ def construct_evaluation_prompt(assessment_full_content, question_identifier, st
             请根据以上所有信息，对学生的答案进行评判。
             你的输出必须严格遵循以下两行格式，不要添加任何额外的前导或后置文字：
 
-            第一行：必须以 "Correctness: " 开头，后面跟上你的评判结果。评判结果只能是以下四个选项之一：`Correct`, `Partially Correct`, `Incorrect`, `Cannot Determine`。
+            第一行：必须以 "Correctness: " 开头，后面跟上你的评判结果。评判结果只能是以下四个选项之一：`Correct`, `Partially Correct`, `Incorrect`, `Cannot Determine`。如果没有答案的话，直接判断是`Incorrect`
             第二行及以后：是你的详细评语和解释 (Detailed Feedback)。
 
             这是一个正确的输出格式示例：

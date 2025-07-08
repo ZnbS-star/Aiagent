@@ -2,16 +2,21 @@ from datetime import datetime
 from fastapi import APIRouter,  HTTPException, Body
 from backend_app.auth_service import unified_register_service, unified_login_service
 from backend_app.models import (
-    StudentQuestionInput, StudentQuestionOutput, 
+    PracticeQuestionDetailOutput, PracticeQuestionListOutput, PublishAssessment, StudentAssessmentSummary, StudentQuestionInput, StudentQuestionOutput, TeacherAssessmentListOutput, 
     TeachingPlanNLInput, TeachingPlanOutput, 
     AssessmentInput, AssessmentNLInput, AssessmentOutput, 
     StudentAssessmentInput, StudentAssessmentNLInput,  StudentAssessmentAnswerItem, 
     PracticeQuestionsInput, PracticeQuestionNLInput, PracticeQuestionsOutput, 
     PracticeFeedbackInput,  PracticeFeedbackOutput, 
     Message, StudentPerformanceDetail, Token, UserCreate, UserLogin,
-    RefineStudentQAInput, RefineTeachingPlanInput, RefineAssessmentInput
+    RefineStudentQAInput, RefineTeachingPlanInput, RefineAssessmentInput,
+    PracticeChatInput, PracticeChatOutput, 
 )
 from backend_app.services import (
+    process_practice_chat_service, # 新增
+    get_assessment_detail_service,
+    get_assessment_list_service,
+    get_teacher_assessments_service,
     process_student_question_service, 
     generate_initial_teaching_plan_service,
     generate_assessment_service,
@@ -19,6 +24,7 @@ from backend_app.services import (
     get_student_assessment_performance_service, 
     generate_practice_questions_service,
     get_practice_feedback_service,
+    publish_assessment_service,
     refine_assessment_service,
     refine_student_question_service,
     refine_teaching_plan_service
@@ -26,11 +32,11 @@ from backend_app.services import (
 from backend_app.nlp_utils import parse_query_with_llm 
 from typing import List
 import os
-from backend_app.database_utils import get_mysql_connection, save_teaching_plan,save_assessment
+from backend_app.database_utils import get_mysql_connection, get_question_identifiers_from_assessment, save_teaching_plan,save_assessment
 
 router = APIRouter()
 
-@router.post("register", summary="注册")
+@router.post("/register", summary="注册")
 async def unified_register_endpoint(user_data: UserCreate):
 
     new_user = await unified_register_service(user_data)
@@ -41,7 +47,7 @@ async def login_teacher_endpoint(form_data: UserLogin):
 
     token = await unified_login_service(form_data)
     return token
-
+    
 
 
 @router.post(
@@ -57,6 +63,7 @@ async def login_teacher_endpoint(form_data: UserLogin):
         500: {"model": Message, "description": "Internal Server Error"}
     }
 )
+
 async def student_question_answer(input_data: StudentQuestionInput = Body(..., examples={
     "simple_question": {
         "summary": "A basic question",
@@ -100,7 +107,6 @@ async def refine_student_question(input_data: RefineStudentQAInput = Body(...)):
         raise HTTPException(status_code=400, detail="History cannot be empty.")
     if not input_data.new_query or not input_data.new_query.strip():
         raise HTTPException(status_code=400, detail="New query cannot be empty.")
-
     try:
         result = await refine_student_question_service(input_data) 
         return result 
@@ -110,45 +116,39 @@ async def refine_student_question(input_data: RefineStudentQAInput = Body(...)):
         print(f"API ERROR: An unexpected error occurred in /student-qa/refine endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
-
 @router.post(
     "/teaching-plans",
-    response_model=TeachingPlanOutput,
-    summary="Generate and Save Initial Teaching Plan from Natural Language Query",
-    description="Accepts a natural language query to generate a first draft of a teaching plan using an LLM "
-                "to extract parameters, then RAG and another LLM call for content generation. "
-                "The generated plan is then saved to the database.",
-    responses={
-        200: {"description": "Teaching plan generated and saved successfully."},
-        400: {"model": Message, "description": "Bad Request (e.g., invalid query, missing essential info after NLP, NLP processing error)"},
-        500: {"model": Message, "description": "Internal Server Error / LLM or RAG failure during plan generation"}
-    }
+
 )
-async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
+async def create_initial_teaching_plan(input_data: TeachingPlanNLInput):
     if not input_data.query or not input_data.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
 
     FULL_PROMPT_FOR_LLM = f"""
-    请分析以下用户查询，并从中提取特定信息。
+    请分析以下用户查询，并从中提取特定信息用于创建教案。
 
     --- 用户查询开始 ---
     {input_data.query}
-        --- 用户查询结束 ---
+    --- 用户查询结束 ---
 
-        你的任务是根据上述查询，提取以下实体：
-        1.  "teaching_outline"（字符串，必填）：用户明确要求的核心教学主题。例如 "TensorFlow.js编程"。
-        2.  "style_tone"（字符串，可选）：教案的特定风格或语气。如果用户未提及，则此字段应为 null。
-        3.  "output_structure"（字符串，可选）：所需的输出结构。如果用户未提及，则此字段应为 null。
-        4.  "title_for_db"（字符串，可选）：用于保存教案的特定标题。如果用户未指定，请基于 `teaching_outline` 生成一个简洁的标题。
+    你的任务是根据上述查询，提取以下实体：
+    1.  "teaching_outline" (字符串, 必填): 用户明确要求的核心教学主题。例如 "TensorFlow.js编程"。
+    2.  "subject" (字符串, 可选): 查询中明确或暗示的学科领域。例如 "计算机科学", "生物", "历史"。如果未提及，请基于 `teaching_outline` 生成一个科目。
+    3.  "style_tone" (字符串, 可选): 教案的特定风格或语气。如果用户未提及，则此字段应为 null。
+    4.  "output_structure" (字符串, 可选): 所需的输出结构。如果用户未提及，则此字段应为 null。
+    5.  "title_for_db" (字符串, 可选): 用于保存教案的特定标题。如果用户未指定，请基于 `teaching_outline` 生成一个简洁的标题。
 
-        你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
+    你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
     """
     parsed_entities_dict = await parse_query_with_llm(FULL_PROMPT_FOR_LLM)
 
     if "error" in parsed_entities_dict:
-        raise HTTPException(status_code=400, detail=f"NLP processing error: {parsed_entities_dict['error']} - Details: {parsed_entities_dict.get('details', 'N/A')}")
+        raise HTTPException(status_code=400, detail=f"NLP processing error: {parsed_entities_dict['error']}")
+    
+
     teaching_outline = parsed_entities_dict.get("teaching_outline")
+    subject = parsed_entities_dict.get("subject") 
     style_tone = parsed_entities_dict.get("style_tone")
     output_structure = parsed_entities_dict.get("output_structure")
     title_for_db = parsed_entities_dict.get("title_for_db")
@@ -184,7 +184,8 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput ):
             db_conn,
             title_to_save,
             generated_content,
-            final_teacher_id 
+            final_teacher_id,
+            subject=subject  
         )
         if plan_id:
             return TeachingPlanOutput(
@@ -234,7 +235,7 @@ async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
         MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
         if not db_conn:
-            # 即使无法保存，也应该返回生成的内容，让用户可以复制
+
             return TeachingPlanOutput(
                 title=new_title,
                 generated_plan_content=full_generated_content,
@@ -242,7 +243,7 @@ async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
                 error_message="Content generated but failed to connect to DB for saving."
             )
 
-        # 调用保存函数，存入一个新的记录
+
         new_plan_id = save_teaching_plan(
             db_conn,
             new_title,
@@ -250,10 +251,10 @@ async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
             input_data.teacher_id
         )
 
-        # 3. 返回新副本的信息
+
         if new_plan_id:
             return TeachingPlanOutput(
-                teaching_plan_id=new_plan_id, # 返回【新】的ID
+                teaching_plan_id=new_plan_id, 
                 title=new_title,
                 generated_plan_content=full_generated_content,
                 teacher_id=input_data.teacher_id
@@ -273,22 +274,12 @@ async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
 
 @router.post(
     "/assessments/generate",
-    response_model=AssessmentOutput,
-    summary="Generate and Save an Assessment from Natural Language Query",
-    description="Accepts a natural language query to generate an assessment. Uses an LLM to extract "
-                "teaching plan content, question preferences, and other details. The assessment is then "
-                "generated by the service layer (which might involve RAG and another LLM call) "
-                "and saved to the database.",
-    responses={
-        200: {"description": "Assessment generated and saved successfully."},
-        400: {"model": Message, "description": "Bad Request (e.g., invalid query, missing essential info after NLP, NLP processing error)"},
-        500: {"model": Message, "description": "Internal Server Error / LLM or RAG failure during assessment generation"}
-    }
+    
 )
 async def create_assessment_endpoint(input_data: AssessmentNLInput): 
-
     if not input_data.query or not input_data.query.strip():
         raise HTTPException(status_code=400, detail="查询内容不能为空。")
+
     FULL_PROMPT_FOR_ASSESSMENT_NLP = f"""
     请分析以下用户查询，该查询旨在生成一份考核。你的任务是从中提取特定信息。
 
@@ -297,74 +288,77 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
     --- 用户查询结束 ---
 
     你需要根据上述查询，提取以下实体：
-    1.  "teaching_plan_content" (字符串, 必填): 考核应涵盖的核心内容、主题或材料摘要。例如："一战的起因"、"宝可梦关都地区的图鉴、道馆馆主和四天王"。
-    2.  "question_preferences" (对象, 可选): 一个指定所需问题类型和数量的字典。例如：{{"选择题": 3, "简答题": 2}}。如果用户没有明确指定数量和类型，请返回任意数量和类型。
-    3.  "title_for_db" (字符串, 可选): 用于保存考核的特定标题。如果用户未指定，请返回 null。
+    1.  "teaching_plan_content" (字符串, 必填): 考核应涵盖的核心内容、主题或材料摘要。
+    2.  "subject" (字符串, 可选): 查询中明确或暗示的学科领域。例如 "计算机科学", "物理", "文学"。如果未提及，则根据问题生成一个subject。
+    3.  "question_preferences" (对象, 可选): 一个指定所需问题类型和数量的字典。
+        *   **如果用户明确指定了问题类型 (例如，“选择题”，“填空题”等)，则 `question_preferences` 字典中必须只包含用户明确要求的类型。不要添加任何用户未提及的类型。**
+        *   如果用户指定了类型但未指定数量，为每种指定的类型设定一个合理的默认数量 (例如，3-5 道)。
+        *   **只有当用户完全没有提及任何问题类型时**，你才可以根据 `teaching_plan_content` 自动推荐并生成合适的类型和数量 (例如: {{"选择题": 3, "简答题": 2}})。
+        *   如果用户只要求了数量而未指定类型 (例如，“出5道题”），则你可以根据内容推荐类型，并将总数分配给这些类型。
+        *   示例：如果用户说“帮我出几道选择题”，你应该提取出 {{"选择题": 默认数量}} (例如 {{"选择题": 5}})。如果用户说“关于Python基础的选择题和判断题”，你应该提取出 {{"选择题": 默认数量, "判断题": 默认数量}}。
+    4.  "title_for_db" (字符串, 可选): 用于保存考核的特定标题。如果用户未指定，请基于 `teaching_plan_content` 生成一个简洁的标题。
 
     你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
-"""
-
+    """
     parsed_entities_dict = await parse_query_with_llm(FULL_PROMPT_FOR_ASSESSMENT_NLP)
 
-
     if "error" in parsed_entities_dict:
-        raise HTTPException(status_code=400, detail=f"NLP 处理错误: {parsed_entities_dict['error']} - 详情: {parsed_entities_dict.get('details', 'N/A')}")
+        raise HTTPException(status_code=400, detail=f"NLP 处理错误: {parsed_entities_dict['error']}")
 
     teaching_plan_content = parsed_entities_dict.get("teaching_plan_content")
     if not teaching_plan_content:
-        raise HTTPException(status_code=400, detail="NLP 未能从查询中提取必需的实体 'teaching_plan_content'。")
+        raise HTTPException(status_code=400, detail="NLP 未能从查询中提取必需的 'teaching_plan_content'。")
 
+    subject = parsed_entities_dict.get("subject") 
     nlp_title_for_db = parsed_entities_dict.get("title_for_db")
-    question_preferences = parsed_entities_dict.get("question_preferences") 
-
-    if question_preferences and not isinstance(question_preferences, dict):
-
-        print(f"WARNING: 'question_preferences' from LLM was not a dict: {question_preferences}")
-        question_preferences = {} 
+    question_preferences = parsed_entities_dict.get("question_preferences")
+    print(question_preferences)
 
     assessment_service_input = AssessmentInput(
         teaching_plan_content=teaching_plan_content,
         teacher_id=input_data.teacher_id,
+        subject=subject, 
         question_preferences=question_preferences if question_preferences else {}, 
         title_for_db=nlp_title_for_db 
     )
     
-
-
     db_conn = None
     try:
-        
-        generated_content = await generate_assessment_service(assessment_service_input)
 
-        if not generated_content:
-            raise HTTPException(status_code=500, detail="服务未能从LLM生成考核内容。")
+        questions_part, answers_part = await generate_assessment_service(assessment_service_input)
 
+        if not questions_part:
+            raise HTTPException(status_code=500, detail="服务未能生成考核内容。")
        
         title_to_save = nlp_title_for_db if nlp_title_for_db else f"关于“{teaching_plan_content[:20]}...”的考核"
         
 
-        final_teacher_id = input_data.teacher_id
         
         MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
         assessment_id = save_assessment(
             db_conn,
             title_to_save,
-            generated_content,
-            final_teacher_id
+            questions_part,    
+            answers_part,      
+            input_data.teacher_id,
+            subject=subject    
         )
         if assessment_id:
             return AssessmentOutput(
                 assessment_id=assessment_id,
                 title=title_to_save,
-                generated_assessment_content=generated_content,
-                teacher_id=final_teacher_id
+                generated_assessment_content=questions_part, 
+                teacher_id=input_data.teacher_id,
+                subject=subject 
             )
         else:
+            # 即使保存失败，也只返回问题部分
             return AssessmentOutput(
                 title=title_to_save,
-                generated_assessment_content=generated_content,
-                error_message="考核已生成但保存至数据库失败。"
+                generated_assessment_content=questions_part,
+                error_message="考核已生成但保存至数据库失败。",
+                subject=subject
             )
     except HTTPException as he:
         raise he
@@ -374,7 +368,6 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
     finally:
         if db_conn and db_conn.is_connected():
             db_conn.close()
-
 
 @router.post(
     "/assessments/refine",
@@ -394,8 +387,11 @@ async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
     db_conn = None
     try:
         # 1. 调用服务，并解构返回的元组
-        full_generated_content,_= await refine_assessment_service(input_data)
-
+        full_generated_content,_,subject= await refine_assessment_service(input_data)
+        answer_separator = "参考答案与解析"
+        parts = full_generated_content.split(answer_separator, 1)
+        questions_part = parts[0].strip()
+        answers_part = parts[1].strip() if len(parts) > 1 else "（无答案信息）"
         # 2. 检查服务是否成功生成内容
         if not full_generated_content:
             raise HTTPException(status_code=500, detail="Failed to generate refined assessment content.")
@@ -417,17 +413,18 @@ async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
         new_assessment_id = save_assessment(
             db_conn,
             new_title,
-            full_generated_content,
-            input_data.teacher_id
-            # 如果需要 subject, 这里也要处理
+            questions_part,      # ## 修改点4: 只保存问题部分到 content
+            answers_part,        # ## 修改点5: 将答案部分保存到 answers 字段
+            input_data.teacher_id,
+            subject=subject # ## 修改点6: 保存学科
+            
         )
 
-        # 4. 构造并返回正确的 Pydantic 模型实例
         if new_assessment_id:
             return AssessmentOutput(
                 assessment_id=new_assessment_id,
                 title=new_title,
-                generated_assessment_content=full_generated_content,
+                generated_assessment_content=questions_part,
                 teacher_id=input_data.teacher_id
             )
         else:
@@ -444,7 +441,7 @@ async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
 
 
 @router.post(
-    "/student-assessments/evaluate-answers",
+    "/assessments/evaluate-answers",
     response_model=Message, 
     summary="Evaluate Student's Assessment Answers from Natural Language Query",
     description="Accepts a natural language query detailing a student's answers to an assessment. "
@@ -465,51 +462,99 @@ async def evaluate_student_answers(input_data: StudentAssessmentNLInput ):
     if not input_data.assessment_id: 
         raise HTTPException(status_code=422, detail="assessment_id is required.")
     FULL_PROMPT_FOR_EVAL_NLP = f"""
-    请从以下文本中，提取出学生针对一份考核所提交的全部答案。
+    你的任务是分析并提取学生针对一份考核所提交的答案。请仔细阅读以下文本。
 
     --- 用户提供的文本开始 ---
     {input_data.query}
     --- 用户提供的文本结束 ---
 
-    你的任务是根据上述文本，提取以下实体：
-    - "answers" (对象数组, 必填): 一个包含学生所有答案的列表。数组中的每一个对象都必须包含以下两个键：
-        - "question_identifier" (字符串, 必填): 问题的标识符（例如: "题目1", "一、选择题-1", "T1"）。
-        - "student_answer_text" (字符串, 必填): 学生对该问题的回答内容。
+    请根据上述文本，严格按照以下规则提取实体并输出一个JSON对象：
 
-    这是一个 "answers" 字段的正确格式示例:
-    `[
+    1.  **答案提取规则**:
+        - 你的目标是提取一个名为 "answers" 的对象数组。
+        - 数组中的每个对象都必须包含 "question_identifier" (字符串, 必填) 和 "student_answer_text" (字符串, 必填)。
+        - **示例**: `{{ "question_identifier": "题目1", "student_answer_text": "A" }}`
+
+    2.  **特殊情况处理规则 (最重要!)**:
+        - **如果文本明确表示学生不会回答或放弃作答** (例如 "我不会"、"不知道"、"交白卷"、"放弃")，你的JSON输出中，"answers" 字段必须是一个 **空数组 `[]`**。
+        - **如果文本既不包含任何可识别的答案，也不包含明确的放弃信息** (例如 "这是什么题目？"、"老师好")，你的JSON输出中，"answers" 字段也必须是一个 **空数组 `[]`**。
+        - **在以上特殊情况下，你可以选择性地在JSON中增加一个 "status" 字段**，值为 "NO_ANSWERS_PROVIDED"。
+
+    3.  **最终输出格式**:
+        - 你的最终响应必须是且只能是一个JSON对象。
+        - 不要包含任何解释性文字或前导/后置文本。
+
+    **正确输出示例 1 (成功提取):**
+    ```json
+    {{
+      "answers": [
         {{"question_identifier": "题目1", "student_answer_text": "A"}},
-        {{"question_identifier": "题目2", "student_answer_text": "B"}},
-        {{"question_identifier": "简答题1", "student_answer_text": "主要原因是地心引力。"}}
-    ]`
+        {{"question_identifier": "简答题1", "student_answer_text": "地心引力。"}}
+      ]
+    }}
+    ```
 
-    如果无法从文本中提取出符合上述格式的答案列表，请在JSON的"error"字段中说明原因。
-    你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
-"""
+    **正确输出示例 2 (用户表示不会):**
+    ```json
+    {{
+      "answers": [],
+      "status": "NO_ANSWERS_PROVIDED"
+    }}
+    ```
+    
+    现在，请开始分析并生成JSON：
+    """
     parsed_entities_dict = await parse_query_with_llm(FULL_PROMPT_FOR_EVAL_NLP)
 
     if "error" in parsed_entities_dict:
         raise HTTPException(status_code=400, detail=f"NLP processing error: {parsed_entities_dict['error']} - Details: {parsed_entities_dict.get('details', 'N/A')}")
 
     answers_raw = parsed_entities_dict.get("answers")
-    if not answers_raw or not isinstance(answers_raw, list) or not answers_raw:
-        raise HTTPException(status_code=400, detail="NLP could not extract a valid list of answers from the query, or the list was empty.")
+    parsed_answers_for_service: List[StudentAssessmentAnswerItem] = []
+    if not isinstance(answers_raw, list) or not answers_raw:
+        # 如果LLM没有返回有效的答案列表 (包括返回空列表)
+        print("API INFO: No answers extracted by LLM. Assuming student submitted a blank paper.")
+        
+        db_conn_temp = None
+        try:
+            # 需要连接数据库来获取这份试卷的所有题目
+            MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+            db_conn_temp = get_mysql_connection(db_name=MYSQL_DB_NAME)
+            if not db_conn_temp:
+                raise HTTPException(status_code=500, detail="Database connection failed, cannot process blank submission.")
+            
+            # 获取该试卷的所有问题标识符
+            all_question_ids = get_question_identifiers_from_assessment(db_conn_temp, input_data.assessment_id)
+            
+            if not all_question_ids:
+                # 如果试卷本身没有可识别的题目，那也无法处理
+                print(f"API WARNING: Could not find any question identifiers for assessment_id {input_data.assessment_id}. Cannot create blank entries.")
+                return Message(message="Submission acknowledged, but no questions found in the assessment to mark as unanswered.")
 
-    parsed_answers_for_service = []
-    for i, ans_item in enumerate(answers_raw):
-        if not isinstance(ans_item, dict):
-            raise HTTPException(status_code=400, detail=f"Invalid item in extracted 'answers' list: item at index {i} is not a dictionary.")
-        q_id = ans_item.get("question_identifier")
-        s_ans = ans_item.get("student_answer_text")
-        if not q_id or not isinstance(q_id, str) or not q_id.strip():
-            raise HTTPException(status_code=400, detail=f"Missing or invalid 'question_identifier' in extracted answer item at index {i}.")
-        if s_ans is None or not isinstance(s_ans, str): 
-            raise HTTPException(status_code=400, detail=f"Missing or invalid 'student_answer_text' in extracted answer item at index {i}.")
-        parsed_answers_for_service.append(StudentAssessmentAnswerItem(question_identifier=q_id.strip(), student_answer_text=s_ans))
+            # 为每个题目创建一个“空答案”的条目
+            for q_id in all_question_ids:
+
+                parsed_answers_for_service.append(
+                    StudentAssessmentAnswerItem(question_identifier=q_id, student_answer_text="") # 答案设为空字符串
+                )
+
+        finally:
+            if db_conn_temp and db_conn_temp.is_connected():
+                db_conn_temp.close()
+    else:
+        # 如果LLM成功提取了答案，就走原来的逻辑
+        for i, ans_item in enumerate(answers_raw):
+            q_id = ans_item.get("question_identifier")
+            s_ans = ans_item.get("student_answer_text")
+            if not q_id or not isinstance(q_id, str) or not q_id.strip():
+                raise HTTPException(...)
+            if s_ans is None or not isinstance(s_ans, str): 
+                raise HTTPException(...)
+            parsed_answers_for_service.append(StudentAssessmentAnswerItem(question_identifier=q_id.strip(), student_answer_text=s_ans))
     
-
     
-
+    if not parsed_answers_for_service:
+        return Message(message="No answers to evaluate.")
     student_assessment_service_input = StudentAssessmentInput(
         student_id=input_data.student_id,
         assessment_id=input_data.assessment_id,
@@ -624,51 +669,112 @@ async def generate_practice_questions_endpoint(input_data: PracticeQuestionNLInp
         print(f"API ERROR: An unexpected error occurred in /practice-questions/generate/ endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
+# 新增：处理练习助手持续对话的核心接口
 @router.post(
-    "/practice-questions/feedback",
-    response_model=PracticeFeedbackOutput,
-    summary="Get Feedback on a Student's Natural Language Answer to a Practice Question",
-    description="Submits a student's natural language answer (`student_query_answer`) to a specific practice question, "
-                "along with context like student ID, question ID, question text, model answer, and question type. "
-                "The backend service then uses an LLM to generate and return feedback on the student's answer.",
+    "/practice-assistant/chat",
+    response_model=PracticeChatOutput,
+    summary="[Student] Interact with the Practice Assistant",
+    description="Handles the ongoing conversation for practice questions. "
+                "Send the entire chat history and the user's new message. "
+                "The API will detect the user's intent (refine questions, submit answer, etc.) "
+                "and respond accordingly.",
     responses={
-        200: {"description": "Feedback provided successfully."},
-        422: {"model": Message, "description": "Validation Error (e.g., missing required fields in input)"}, # More specific than generic 400
-        500: {"model": Message, "description": "Internal Server Error / LLM failure during feedback generation"}
+        200: {"description": "Successful interaction."},
+        400: {"model": Message, "description": "Bad Request (e.g., empty history or query)"},
+        500: {"model": Message, "description": "Internal Server Error"}
     }
 )
-async def get_practice_feedback_endpoint(input_data: PracticeFeedbackInput = Body):
-
+async def practice_assistant_chat(input_data: PracticeChatInput):
+    if not input_data.history or not input_data.new_query:
+        raise HTTPException(status_code=400, detail="History and new_query are required for a chat interaction.")
+    
     try:
-        result = await get_practice_feedback_service(input_data)
+        result = await process_practice_chat_service(input_data)
         return result
-    except HTTPException as he: 
-        raise he
     except Exception as e:
-        
-        print(f"API ERROR: An unexpected error occurred in /practice-questions/feedback/ endpoint: {e}")
+        print(f"API ERROR in /practice-assistant/chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
 
 @router.get(
     "/assessments/{assessment_id}/student-performance/",
-    response_model=List[StudentPerformanceDetail],
-    summary="Get All Student Performance Details for a Specific Assessment",
-    description="Retrieves a list of detailed performance records for all students who took a specific assessment. "
-                "This is typically for a teacher to view class performance on a given assessment.",
+    response_model=List[StudentAssessmentSummary],
+    summary="Get Aggregated Student Performance for a Specific Assessment",
+    description="Retrieves an aggregated list of performance summaries for all students who took a specific assessment. "
+                "Each summary includes counts of correct/incorrect answers and a calculated accuracy rate.",
     responses={
-        200: {"description": "Successfully retrieved student performance details."},
+        200: {"description": "Successfully retrieved student performance summary."},
         404: {"model": Message, "description": "Assessment not found."},
         500: {"model": Message, "description": "Internal Server Error."}
     }
 )
 async def get_assessment_performance_for_teacher(assessment_id: int):
     try:
-        performance_details = await get_student_assessment_performance_service(assessment_id=assessment_id)
-        return performance_details
+        performance_summary = await get_student_assessment_performance_service(assessment_id=assessment_id)
+        return performance_summary
     except HTTPException as he:
         raise he 
     except Exception as e:
         print(f"API ERROR: An unexpected error occurred in /assessments/{assessment_id}/student-performance/ endpoint: {e}")
-        # Log the full error e for server-side debugging
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+    
+@router.get(
+    "/assessments/list",
+    response_model=PracticeQuestionListOutput,
+    summary="Get List of Available Practice Questions",
+    description="Retrieves a list of all available practice question sets, including their ID and a generated title, for a student to choose from.",
+    responses={
+        200: {"description": "Successfully retrieved the list of practice questions."},
+        500: {"model": Message, "description": "Internal Server Error."}
+    }
+)
+async def get_practice_list_endpoint():
+    try:
+        return await get_assessment_list_service()
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"API ERROR: An unexpected error occurred in /practice-questions/list endpoint: {e}")
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
+
+
+@router.get(
+    "/assessments/{assessment_id}/details",  # <-- 建议使用更具描述性的路由
+    response_model=PracticeQuestionDetailOutput,
+    summary="Get Details of a Specific Assessment",
+    description="Retrieves the full content of a specific assessment by its ID.",
+    responses={
+        200: {"description": "Successfully retrieved assessment details."},
+        404: {"model": Message, "description": "Assessment not found."},
+        500: {"model": Message, "description": "Internal Server Error."}
+    }
+)
+async def get_assessment_detail_endpoint(assessment_id: int): # <-- 参数名也更清晰
+    try:
+        # 调用修正后的服务函数
+        return await get_assessment_detail_service(assessment_id)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"API ERROR: An unexpected error occurred in /assessments/{assessment_id}/details endpoint: {e}")
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
+    
+@router.get(
+    "/teacher/assessments/{teacher_id}",
+    response_model=TeacherAssessmentListOutput,
+    summary="[Teacher] Get all assessments created by the teacher",
+)
+
+async def get_teacher_assessments_endpoint(teacher_id: int): 
+    # teacher_id = current_user.id
+    return await get_teacher_assessments_service(teacher_id)
+
+
+@router.post(
+    "/teacher/assessments/publish",
+    response_model=Message,
+    summary="[Teacher] Publish an assessment",
+
+)
+async def publish_assessment_endpoint(inputdata:PublishAssessment =Body): 
+    return await publish_assessment_service(inputdata.assessment_id,inputdata.teacher_id)

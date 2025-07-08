@@ -1,5 +1,6 @@
 import os 
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 import mysql.connector
 from mysql.connector import Error 
 import json 
@@ -207,45 +208,48 @@ def get_student_performance_for_assessment(db_conn, assessment_id: int) -> list:
             
     return results
 
-def save_teaching_plan(db_conn,title, content, teacher_id=None):
+def save_teaching_plan(db_conn, title, content, teacher_id=None, subject=None):
     """Saves a teaching plan to the database."""
     if not db_conn:
         print("No database connection provided to save_teaching_plan.")
-        return False
+        return None
     
     cursor = db_conn.cursor()
-    sql = "INSERT INTO teaching_plans (teacher_id, title, content) VALUES (%s, %s, %s)"
-    val = (teacher_id,title, content)
+    # <--- 修改SQL和参数
+    sql = "INSERT INTO teaching_plans (teacher_id, title, content, subject) VALUES (%s, %s, %s, %s)"
+    val = (teacher_id, title, content, subject)
     try:
         cursor.execute(sql, val)
         db_conn.commit()
-        print(f"Teaching plan '{title}' (Teacher ID: {teacher_id}) saved successfully. Last inserted ID: {cursor.lastrowid}")
-        return cursor.lastrowid # Return the ID of the inserted row
+        print(f"Teaching plan '{title}' (Subject: {subject}, Teacher ID: {teacher_id}) saved. ID: {cursor.lastrowid}")
+        return cursor.lastrowid
     except mysql.connector.Error as err:
-        print(f"Error saving teaching plan '{title}' (Teacher ID: {teacher_id}): {err}")
+        print(f"Error saving teaching plan '{title}': {err}")
         db_conn.rollback()
-        return False
+        return None
     finally:
         cursor.close()
 
-def save_assessment(db_conn, title, content, teacher_id=None):
-    """Saves an assessment to the database."""
+# --- 4. 修改 save_assessment 函数 (同时完成问题/答案分离) ---
+def save_assessment(db_conn, title, questions_text, answers_text, teacher_id=None, subject=None):
+    """Saves an assessment to the database with questions and answers separated."""
     if not db_conn:
         print("No database connection provided to save_assessment.")
-        return False
+        return None
         
     cursor = db_conn.cursor()
-    sql = "INSERT INTO assessments (teacher_id, title, content) VALUES (%s, %s, %s)"
-    val = (teacher_id, title, content)
+    # <--- 修改SQL和参数
+    sql = "INSERT INTO assessments (teacher_id, title, questions_text, answers_text, subject) VALUES (%s, %s, %s, %s, %s)"
+    val = (teacher_id, title, questions_text, answers_text, subject)
     try:
         cursor.execute(sql, val)
         db_conn.commit()
-        print(f"Assessment '{title}' (Teacher ID: {teacher_id}) saved successfully. Last inserted ID: {cursor.lastrowid}")
+        print(f"Assessment '{title}' (Subject: {subject}, Teacher ID: {teacher_id}) saved. ID: {cursor.lastrowid}")
         return cursor.lastrowid 
     except mysql.connector.Error as err:
-        print(f"Error saving assessment '{title}' (Teacher ID: {teacher_id}): {err}")
+        print(f"Error saving assessment '{title}': {err}")
         db_conn.rollback()
-        return False
+        return None
     finally:
         cursor.close()
 
@@ -674,3 +678,184 @@ def get_teaching_plan_by_id(db_conn, plan_id: int) -> Optional[dict]:
         return None
     finally:
         cursor.close()
+
+
+def get_all_assessment_for_student_view(db_conn: mysql.connector.connection.MySQLConnection) -> List[Dict[str, Any]]:
+    if not db_conn:
+        print("DB_UTILS ERROR: No database connection provided.")
+        return []
+    cursor = None
+    try:
+        cursor = db_conn.cursor(dictionary=True)
+        query = """
+            SELECT 
+                a.id,
+                a.title
+            FROM 
+                published_assessments pa
+            JOIN 
+                assessments a ON pa.assessment_id = a.id
+            WHERE
+                pa.is_active = TRUE
+            ORDER BY 
+                pa.published_at DESC;
+        """
+        cursor.execute(query)
+        raw_results = cursor.fetchall()
+        return raw_results
+    except mysql.connector.Error as err:
+        print(f"DB_UTILS ERROR: Failed to fetch published practice questions list. Error: {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+
+
+def get_assessment_details_by_id(db_conn: mysql.connector.connection.MySQLConnection, assessment_id: int) -> Optional[Dict[str, Any]]:
+    """Retrieves the questions_text of a specific assessment by its ID."""
+    if not db_conn:
+        print("DB_UTILS ERROR: No database connection provided.")
+        return None
+    try:
+        cursor = db_conn.cursor(dictionary=True)
+        # 只查询问题部分，并重命名为 content 以适配前端模型
+        query = """
+            SELECT 
+                id,
+                questions_text AS content, -- 保持 content 别名以兼容现有逻辑
+                answers_text,             -- 新增获取 answers_text
+                subject
+            FROM 
+                assessments 
+            WHERE 
+                id = %s
+        """
+        cursor.execute(query, (assessment_id,))
+        result = cursor.fetchone()
+        return result
+    except mysql.connector.Error as err:
+        print(f"DB_UTILS ERROR: Failed to fetch assessment details for ID {assessment_id}. Error: {err}")
+        return None
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+
+def get_question_identifiers_from_assessment(db_conn, assessment_id: int) -> list[str]:
+
+    if not db_conn:
+        return []
+    
+    cursor = db_conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT questions_text FROM assessments WHERE id = %s", (assessment_id,))
+        result = cursor.fetchone()
+        if not result or not result.get('questions_text'):
+            return []
+        
+        content = result['questions_text']
+        
+        # 使用正则表达式匹配 "题目x" 或 "Question x" 等模式
+        # 这个正则表达式可以根据你生成题目的格式进行微调
+        # 它会寻找 "题目" 或 "Question" 开头，后面跟数字和冒号或点
+        identifiers = re.findall(r'(?:题目|Question)\s*(\d+)[\s:：.]', content)
+        
+        # 将匹配到的数字格式化为 "题目X"
+        formatted_identifiers = [f"题目{num}" for num in identifiers]
+
+        # 如果上面的正则没匹配到，可以尝试一个更通用的，比如匹配每一行的开头
+        if not formatted_identifiers:
+             # 匹配以 "数字." 或 "数字、" 开头的行作为题目标识
+             lines = content.split('\n')
+             for line in lines:
+                 match = re.match(r'^\s*(\d+[.、])', line)
+                 if match:
+                     formatted_identifiers.append(match.group(1).strip())
+
+        print(f"DB_UTILS: Found identifiers for assessment {assessment_id}: {formatted_identifiers}")
+        return formatted_identifiers
+        
+    except mysql.connector.Error as err:
+        print(f"Error getting question identifiers: {err}")
+        return []
+    finally:
+        cursor.close()
+
+def publish_assessment(db_conn, assessment_id: int, teacher_id: int) -> bool:
+    if not db_conn: return False
+    cursor = db_conn.cursor()
+    sql = "INSERT IGNORE INTO published_assessments (assessment_id, teacher_id) VALUES (%s, %s)"
+    try:
+        cursor.execute(sql, (assessment_id, teacher_id))
+        db_conn.commit()
+        # cursor.rowcount会返回受影响的行数，如果是1则表示插入成功，0表示已存在
+        return cursor.rowcount > 0
+    except mysql.connector.Error as err:
+        print(f"Error publishing assessment {assessment_id}: {err}")
+        db_conn.rollback()
+        return False
+    finally:
+        cursor.close()
+
+
+def get_assessments_by_teacher_id(db_conn, teacher_id: int) -> List[Dict[str, Any]]:
+    if not db_conn: return []
+    cursor = db_conn.cursor(dictionary=True)
+    results = []
+    try:
+        sql = """
+            SELECT a.id, a.title, a.subject, a.created_at
+            FROM assessments a
+            LEFT JOIN published_assessments pa ON a.id = pa.assessment_id
+            WHERE a.teacher_id = %s and pa.publish_id IS NULL
+            ORDER BY a.created_at DESC;
+        """
+        cursor.execute(sql, (teacher_id,))
+        results = cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error fetching assessments for teacher {teacher_id}: {err}")
+    finally:
+        cursor.close()
+    return results
+
+def get_aggregated_student_performance(db_conn, assessment_id: int) -> list:
+    """
+    Retrieves aggregated performance data for each student on a specific assessment.
+    """
+    if not db_conn:
+        print("No database connection provided to get_aggregated_student_performance.")
+        return []
+
+    cursor = None
+    try:
+        cursor = db_conn.cursor(dictionary=True)
+        # This query groups by student and counts the occurrences of each correctness status.
+        sql = """
+            SELECT
+                saa.student_id,
+                s.student_name,
+                COUNT(saa.answer_id) AS total_answered,
+                SUM(CASE WHEN saa.llm_assessed_correctness = 'Correct' THEN 1 ELSE 0 END) AS correct_count,
+                SUM(CASE WHEN saa.llm_assessed_correctness = 'Partially Correct' THEN 1 ELSE 0 END) AS partially_correct_count,
+                SUM(CASE WHEN saa.llm_assessed_correctness = 'Incorrect' THEN 1 ELSE 0 END) AS incorrect_count
+            FROM
+                student_assessment_answers saa
+            JOIN
+                students s ON saa.student_id = s.student_id
+            WHERE
+                saa.assessment_id = %s
+            GROUP BY
+                saa.student_id, s.student_name
+            ORDER BY
+                s.student_name;
+        """
+        cursor.execute(sql, (assessment_id,))
+        results = cursor.fetchall()
+        if not results:
+            print(f"No performance data found for assessment_id: {assessment_id}")
+        return results
+    except mysql.connector.Error as err:
+        print(f"Error aggregating student performance for assessment_id {assessment_id}: {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()

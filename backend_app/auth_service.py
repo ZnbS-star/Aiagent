@@ -39,9 +39,9 @@ async def unified_register_service(user_data: UserCreate) -> Dict[str, Any]:
         if not new_student:
             raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="创建教师账户失败。",
+            detail="创建学生账户失败。",
         )
-        return {"student_id": new_student["teacher_id"], "student_name": new_student["teacher_name"]}
+        return {"student_id": new_student["student_id"], "student_name": new_student["student_name"]}
     elif user_data.role == 1:
         # 管理员不能通过此接口注册
         raise HTTPException(
@@ -61,7 +61,7 @@ async def unified_login_service(form_data: UserLogin) -> Token:
         if not teacher or not verify_password(form_data.password, teacher["hashed_password"]):
             raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码不正确。",
+            detail="用户名或密码不正确。",  
             headers={"WWW-Authenticate": "Bearer"},
             )
     
@@ -69,7 +69,10 @@ async def unified_login_service(form_data: UserLogin) -> Token:
         access_token = create_access_token(
         data={"sub": teacher["teacher_name"], "role": "teacher"}
     )
-        return Token(access_token=access_token, token_type="bearer")
+        username=teacher["teacher_name"]
+        userId=teacher["teacher_id"]
+
+        return Token(access_token=access_token, token_type="bearer",username=username,userid=userId,role=3)
     elif form_data.role == 2:
         student = await get_student_for_auth(form_data.username)
         if not student or not verify_password(form_data.password, student["hashed_password"]):
@@ -81,8 +84,11 @@ async def unified_login_service(form_data: UserLogin) -> Token:
         
         access_token = create_access_token(
         data={"sub": student["student_name"], "role": "student"}
+        
     )
-        return Token(access_token=access_token, token_type="bearer")
+        username=student["student_name"]
+        userId=student["student_id"]
+        return Token(access_token=access_token, token_type="bearer",username=username,userid=userId,role=2)
     elif form_data.role == 1:
         if form_data.username != ADMIN_USERNAME or form_data.password != ADMIN_PASSWORD:
             raise HTTPException(
@@ -94,7 +100,7 @@ async def unified_login_service(form_data: UserLogin) -> Token:
         access_token = create_access_token(
             data={"sub": ADMIN_USERNAME, "role": "admin"}
         )
-        return Token(access_token=access_token, token_type="bearer")
+        return Token(access_token=access_token, token_type="bearer",username="admin",userid=0,role=1)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
