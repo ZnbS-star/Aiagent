@@ -1,15 +1,19 @@
+from collections import defaultdict
+import csv
 from datetime import datetime
+import io
 import json
 import os
 import re
 import sys
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from langchain_community.chat_models import ChatZhipuAI # For LLM interaction
 from langchain_core.output_parsers import StrOutputParser # For LLM interaction
 from langchain.prompts import ChatPromptTemplate
 from typing import Literal
 
 from backend_app.nlp_utils import parse_query_with_llm
+from backend_app.security import get_password_hash
 
 IntentType = Literal["INCREMENTAL_ADD", "REVISION", "DELETION", "REWRITE", "UNKNOWN"]
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -17,16 +21,16 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from backend_app.models import (
-    PracticeChatInput, PracticeChatOutput, 
-    FeedbackItem, PracticeQuestionDetailOutput, PracticeQuestionListItem, PracticeQuestionListOutput, PracticeQuestionNLInput, StudentAssessmentSummary, StudentQuestionInput, StudentQuestionOutput,
-    RefineStudentQAInput, RefineTeachingPlanInput, RefineAssessmentInput, ChatMessage, TeacherAssessmentListItem, TeacherAssessmentListOutput  # Added new models
+    ActivityStat, AdminCreateUserInput, AdminResetPasswordInput, AdminResourceDetailView, AssessmentAnalysis, AssessmentAnalysisOutput, ConceptStat, DailyAccuracy, DashboardUsageResponse, PaginatedAdminResourcesResponse, PaginatedUsersResponse, PracticeChatInput, PracticeChatOutput, 
+    FeedbackItem, PracticeQuestionDetailOutput, PracticeQuestionListItem, PracticeQuestionListOutput, PracticeQuestionNLInput, PublishedAssessmentInfo, StudentAssessmentSummary, StudentEffectivenessResponse, StudentQuestionInput, StudentQuestionOutput,
+    RefineStudentQAInput, RefineTeachingPlanInput, RefineAssessmentInput, ChatMessage, SubjectPerformance, TeacherAssessmentListItem, TeacherAssessmentListOutput, TeacherEfficiencyStat, UsageStats  # Added new models
 )
-from backend_app.database_utils import get_aggregated_student_performance, get_all_assessment_for_student_view,  get_assessment_details_by_id, get_assessments_by_teacher_id, get_mysql_connection, get_or_create_student,get_practice_question_details_by_id, get_teaching_plan_by_id, publish_assessment 
+from backend_app.database_utils import admin_create_user, admin_delete_user, admin_update_user_password, get_activity_stats, get_aggregated_student_performance, get_all_assessment_for_student_view, get_all_practice_attempts_with_concepts, get_all_subjects,  get_assessment_details_by_id, get_assessment_question_stats, get_assessments_by_teacher_id, get_daily_accuracy_trend, get_low_performing_subjects, get_mysql_connection,get_practice_question_details_by_id, get_published_assessments_by_teacher, get_student_for_auth, get_teacher_content_creation_stats, get_teacher_for_auth, get_teacher_resource_detail, get_teaching_plan_by_id, get_unified_resources_by_subject, get_users_by_role, publish_assessment 
 from backend_app.student_qa import (
     _rewrite_query_with_history,
     search_knowledge_base_for_answer, 
-    construct_student_qa_prompt, # Keep for initial
-    construct_student_qa_prompt_with_history, # Add for refine
+    construct_student_qa_prompt, 
+    construct_student_qa_prompt_with_history, 
     get_llm_response_to_student
 )
 from backend_app.models import (
@@ -64,8 +68,8 @@ from backend_app.database_utils import (
         get_student_history_summary, 
         save_practice_question_to_catalog,
         save_practice_attempt, 
-        get_student_performance_for_assessment 
-    )
+        log_activity
+    )   
 
 
 from langchain_community.embeddings import ZhipuAIEmbeddings
@@ -171,13 +175,8 @@ async def _identify_practice_intent(history: List[ChatMessage], new_query: str) 
         return "UNKNOWN"
 
 async def process_practice_chat_service(input_data: PracticeChatInput) -> PracticeChatOutput:
-    """
-    Handles the ongoing conversation for the practice assistant, implementing advanced
-    logic for rewriting, adding, and generating questions based on nuanced user intent.
-    """
-    
     intent = await _identify_practice_intent(input_data.history, input_data.new_query)
-
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
     # --- Branch 1: User is submitting an answer ---
     if intent == "SUBMIT_ANSWER":
         if not input_data.active_catalog_id:
@@ -185,6 +184,13 @@ async def process_practice_chat_service(input_data: PracticeChatInput) -> Practi
         try:
             feedback_input = PracticeFeedbackInput(student_id=input_data.student_id, catalog_id=input_data.active_catalog_id, student_answer=input_data.new_query)
             feedback_result = await get_practice_feedback_service(feedback_input)
+            log_activity(
+                    db_conn,
+                    user_id=input_data.student_id,
+                    user_role="student",
+                    activity_type="PRACTICE_SUBMIT_ANSWER",
+                    details={"catalog_id": input_data.active_catalog_id, "attempt_id": feedback_result.attempt_id}
+                )
             return PracticeChatOutput(assistant_response_text="这是你本次作答的反馈：", intent_detected=intent, feedback=feedback_result)
         except Exception as e:
             print(f"Error during feedback service call: {e}")
@@ -221,7 +227,13 @@ async def process_practice_chat_service(input_data: PracticeChatInput) -> Practi
 
         service_input = PracticeQuestionsInput(student_id=input_data.student_id, practice_topic=practice_topic, question_preferences=final_prefs)
         new_questions_result = await generate_practice_questions_service(service_input)
-
+        log_activity(
+                    db_conn,
+                    user_id=input_data.student_id,
+                    user_role="student",
+                    activity_type="GENERATE_NEW_PRACTICE",
+                    details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
+                )
         if new_questions_result.error_message:
              return PracticeChatOutput(assistant_response_text=f"抱歉，生成题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
         
@@ -322,7 +334,13 @@ async def process_practice_chat_service(input_data: PracticeChatInput) -> Practi
 
         if new_questions_result.error_message:
             return PracticeChatOutput(assistant_response_text=f"抱歉，在处理题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
-
+        log_activity(
+                    db_conn,
+                    user_id=input_data.student_id,
+                    user_role="student",
+                    activity_type="PRACTICE_" + intent, # 动态记录是 ADD 还是 REWRITE
+                    details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
+                )
         return PracticeChatOutput(
             assistant_response_text="好的，已为你添加新题目。这是修改后的完整练习题：",
             intent_detected=intent,
@@ -424,7 +442,13 @@ async def process_practice_chat_service(input_data: PracticeChatInput) -> Practi
 
         if new_questions_result.error_message:
             return PracticeChatOutput(assistant_response_text=f"抱歉，在处理题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
-
+        log_activity(
+                    db_conn,
+                    user_id=input_data.student_id,
+                    user_role="student",
+                    activity_type="PRACTICE_" + intent, 
+                    details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
+                )
         return PracticeChatOutput(
             assistant_response_text="好的，这是根据你的要求修改后的完整练习题：",
             intent_detected=intent,
@@ -530,6 +554,15 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
         if llm_response:
             llm_answer = llm_response
             print("SERVICE: LLM response received.")
+            db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+            log_activity(
+                        db_conn,
+                        user_id=input_data.student_id,
+                        user_role="student",
+                        activity_type="STUDENT_QA",
+                        details={"question_length": len(input_data.question)}
+                    )
+            db_conn.close()
         else:
             llm_answer = "Failed to get a response from the LLM."
             error_message = "LLM did not provide an answer."
@@ -704,7 +737,13 @@ async def evaluate_student_assessment_answers_service(
         if not assessment_data or not assessment_data.get("content"):
             raise ValueError(f"Could not retrieve content for assessment ID {input_data.assessment_id}.")
         assessment_content = assessment_data["content"]
-
+        log_activity(
+            db_conn,
+            user_id=actual_student_id,
+            user_role="student",
+            activity_type="SUBMIT_ASSESSMENT",
+            details={"assessment_id": input_data.assessment_id, "answer_count": len(input_data.answers)}
+        )
         for answer_item in input_data.answers:
             question_id_str = answer_item.question_identifier
             student_ans_text = answer_item.student_answer_text
@@ -935,8 +974,6 @@ async def get_practice_feedback_service(
 
     现在，请开始生成反馈JSON：
     """
-
-    from backend_app.nlp_utils import parse_query_with_llm
     parsed_feedback_json = await parse_query_with_llm(holistic_feedback_prompt)
 
     if "error" in parsed_feedback_json or not parsed_feedback_json.get("feedback_details"):
@@ -974,13 +1011,12 @@ async def get_practice_feedback_service(
         if not db_conn:
             raise Exception("Database connection failed for saving.")
         
-    # 调用 save_practice_attempt，传入新计算出的评估结果
         attempt_id = save_practice_attempt(
             db_conn,
             input_data.student_id,
             input_data.catalog_id,
             input_data.student_answer,
-            overall_correctness_for_db,       # <--- 修正：保存计算出的准确率
+            overall_correctness_for_db,       
             feedback_for_db
     )
         if not attempt_id:
@@ -1496,6 +1532,13 @@ async def publish_assessment_service(assessment_id: int, teacher_id: int):
         if not db_conn:
             raise HTTPException(status_code=500, detail="Database connection failed.")
         success = publish_assessment(db_conn, assessment_id, teacher_id)
+        log_activity(
+                    db_conn,
+                    user_id=teacher_id,
+                    user_role="teacher",
+                    activity_type="PUBLISH_ASSESSMENT",
+                    details={"assessment_id": assessment_id}
+                )
         
         if not success:
             # 这可能是因为它已经被发布了
@@ -1506,3 +1549,426 @@ async def publish_assessment_service(assessment_id: int, teacher_id: int):
     finally:
         if db_conn and db_conn.is_connected():
             db_conn.close()
+
+async def list_users_service(role: str, page: int, page_size: int, search: Optional[str]) -> PaginatedUsersResponse:
+    db_conn = get_mysql_connection(db_name="Aiagent")
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        result = get_users_by_role(db_conn, role, page, page_size, search)
+        return PaginatedUsersResponse(**result)
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def create_user_by_admin_service(user_data: AdminCreateUserInput) -> Dict[str, Any]:
+
+    if user_data.role == 'student':
+        existing_user = await get_student_for_auth(user_data.username)
+    else:
+        existing_user = await get_teacher_for_auth(user_data.username)
+
+    if existing_user:
+        raise HTTPException(status_code=409, detail=f"Username '{user_data.username}' already exists.")
+
+    hashed_password = get_password_hash(user_data.password)
+    
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        new_user_id = admin_create_user(db_conn, user_data.username, hashed_password, user_data.role)
+        if not new_user_id:
+            raise HTTPException(status_code=500, detail="Failed to create user in database.")
+        return {"id": new_user_id, "username": user_data.username}
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def reset_user_password_service(user_id: int, role: str, password_data: AdminResetPasswordInput):
+    new_hashed_password = get_password_hash(password_data.new_password)
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        success = admin_update_user_password(db_conn, user_id, new_hashed_password, role)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"User with role '{role}' and id {user_id} not found.")
+        return {"message": "Password updated successfully."}
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def delete_user_service(user_id: int, role: str):
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        success = admin_delete_user(db_conn, user_id, role)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"User with role '{role}' and id {user_id} not found.")
+        return {"message": "User deleted successfully."}
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+
+async def get_teacher_resource_detail_service(resource_type: str, resource_id: int) -> AdminResourceDetailView:
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        details = get_teacher_resource_detail(db_conn, resource_type, resource_id)
+        if not details:
+            raise HTTPException(status_code=404, detail="Resource not found.")
+        return AdminResourceDetailView(**details)
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+
+
+
+async def list_all_subjects_service() -> List[str]:
+    """获取所有学科列表。"""
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        subjects = get_all_subjects(db_conn)
+        return subjects
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+
+async def list_resources_by_subject_service(
+    subject: str, page: int, page_size: int, search: Optional[str]
+) -> PaginatedAdminResourcesResponse:
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        data = get_unified_resources_by_subject(db_conn, subject, page, page_size, search)
+        return PaginatedAdminResourcesResponse(**data)
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def export_resources_by_subject_service(subject: str, search: Optional[str]) -> str:
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        data = get_unified_resources_by_subject(db_conn, subject, page=1, page_size=10000, search=search)
+        resources = data.get('resources', [])
+        
+        if not resources:
+            return ""
+
+        output = io.StringIO()
+        if resources:
+            for res in resources:
+                if 'created_at' in res and isinstance(res['created_at'], datetime):
+                    res['created_at'] = res['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+            
+            writer = csv.DictWriter(output, fieldnames=resources[0].keys())
+            writer.writeheader()
+            writer.writerows(resources)
+        
+        return output.getvalue()
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def get_dashboard_usage_service() -> DashboardUsageResponse:
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        daily_raw = get_activity_stats(db_conn, 'daily')
+        weekly_raw = get_activity_stats(db_conn, 'weekly')
+        
+        daily_stats = UsageStats(teacher=[], student=[])
+        for row in daily_raw:
+            stat = ActivityStat(activity_type=row['activity_type'], count=row['count'])
+            if row['user_role'] == 'teacher':
+                daily_stats.teacher.append(stat)
+            elif row['user_role'] == 'student':
+                daily_stats.student.append(stat)
+        
+        weekly_stats = UsageStats(teacher=[], student=[])
+        for row in weekly_raw:
+            stat = ActivityStat(activity_type=row['activity_type'], count=row['count'])
+            if row['user_role'] == 'teacher':
+                weekly_stats.teacher.append(stat)
+            elif row['user_role'] == 'student':
+                weekly_stats.student.append(stat)
+
+        return DashboardUsageResponse(daily=daily_stats, weekly=weekly_stats)
+        
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def get_teaching_efficiency_service() -> List[TeacherEfficiencyStat]:
+    """
+    分析教师的备课和修正活动，计算教学效率指数。
+    """
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        # 1. 从数据库获取原始统计数据
+        raw_stats = get_teacher_content_creation_stats(db_conn)
+        
+        # 2. 在Python中处理和聚合数据
+        # 使用一个字典来按 teacher_id 聚合数据
+        teacher_data = {}
+
+        for row in raw_stats:
+            teacher_id = row['teacher_id']
+            teacher_name = row['teacher_name']
+            activity = row['activity_type']
+            count = row['count']
+            
+            # 如果是第一次见到这位老师，为他初始化一个数据结构
+            if teacher_id not in teacher_data:
+                teacher_data[teacher_id] = {
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher_name,
+                    "plans_created": 0,
+                    "assessments_created": 0,
+                    "plans_refined": 0,
+                    "assessments_refined": 0
+                }
+            
+            # 根据活动类型累加次数
+            if activity == 'GENERATE_TEACHING_PLAN':
+                teacher_data[teacher_id]['plans_created'] += count
+            elif activity == 'REFINE_TEACHING_PLAN':
+                teacher_data[teacher_id]['plans_refined'] += count
+            elif activity == 'GENERATE_ASSESSMENT':
+                teacher_data[teacher_id]['assessments_created'] += count
+            elif activity == 'REFINE_ASSESSMENT':
+                teacher_data[teacher_id]['assessments_refined'] += count
+        
+        # 3. 计算每个老师的效率指数并格式化为最终结果
+        final_results = []
+        for teacher_id, data in teacher_data.items():
+            # 计算教案效率指数
+            total_plan_actions = data['plans_created'] + data['plans_refined']
+            if total_plan_actions > 0:
+                plan_efficiency = (data['plans_created'] / total_plan_actions) * 100
+            else:
+                plan_efficiency = 0.0 # 或者 100.0，取决于如何定义无操作的效率
+
+            # 计算考核效率指数
+            total_assessment_actions = data['assessments_created'] + data['assessments_refined']
+            if total_assessment_actions > 0:
+                assessment_efficiency = (data['assessments_created'] / total_assessment_actions) * 100
+            else:
+                assessment_efficiency = 0.0
+
+            # 创建 Pydantic 模型实例
+            stat_entry = TeacherEfficiencyStat(
+                teacher_id=data['teacher_id'],
+                teacher_name=data['teacher_name'],
+                plans_created=data['plans_created'],
+                assessments_created=data['assessments_created'],
+                plans_refined=data['plans_refined'],
+                assessments_refined=data['assessments_refined'],
+                plan_efficiency_index=round(plan_efficiency, 2),
+                assessment_efficiency_index=round(assessment_efficiency, 2)
+            )
+            final_results.append(stat_entry)
+            
+        return final_results
+        
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def get_low_performing_subjects_service() -> List[SubjectPerformance]:
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        raw_data = get_low_performing_subjects(db_conn, limit=5)
+        return [SubjectPerformance(**item) for item in raw_data]
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def get_student_effectiveness_service() -> StudentEffectivenessResponse:
+    db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+        
+    try:
+        # 1. 获取正确率趋势
+        trend_data = get_daily_accuracy_trend(db_conn)
+        
+        # 2. 获取知识点数据并分析
+        attempts_with_concepts = get_all_practice_attempts_with_concepts(db_conn)
+        
+        concept_stats = defaultdict(lambda: {'total': 0, 'score': 0.0, 'incorrect': 0})
+        
+        for attempt in attempts_with_concepts:
+            concepts_str = attempt.get('concepts_covered')
+            correctness = attempt.get('correctness_assessment', '')
+            
+            if not concepts_str: continue
+
+            try:
+                concepts = json.loads(concepts_str)
+                for concept in concepts:
+                    concept_stats[concept]['total'] += 1
+                    # '85.7%'
+                    if '%' in correctness:
+                        score_val = float(correctness.replace('%', '')) / 100.0
+                        concept_stats[concept]['score'] += score_val
+                        if score_val < 0.5: # 假设低于50%算错误
+                            concept_stats[concept]['incorrect'] += 1
+                    # 'Correct', 'Partially Correct'
+                    elif correctness == 'Correct':
+                        concept_stats[concept]['score'] += 1.0
+                    elif correctness == 'Partially Correct':
+                        concept_stats[concept]['score'] += 0.5
+                    elif correctness == 'Incorrect':
+                        concept_stats[concept]['incorrect'] += 1
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+        
+        # 3. 计算结果
+        concept_results = []
+        for concept, stats in concept_stats.items():
+            if stats['total'] > 0:
+                mastery_rate = (stats['score'] / stats['total']) * 100
+                concept_results.append(ConceptStat(
+                    concept=concept,
+                    mastery_rate=round(mastery_rate, 2),
+                    total_attempts=stats['total'],
+                    incorrect_attempts=stats['incorrect']
+                ))
+        
+        # 按掌握率从低到高排序
+        weakest_concepts = sorted(concept_results, key=lambda x: x.mastery_rate)[:10] # 只取最弱的10个
+
+        return StudentEffectivenessResponse(
+            accuracy_trend=[DailyAccuracy(**item) for item in trend_data],
+            weakest_concepts=weakest_concepts
+        )
+
+    finally:
+        if db_conn.is_connected():
+            db_conn.close()
+
+async def get_teacher_published_assessments_service(teacher_id: int) -> List[PublishedAssessmentInfo]:
+    db_conn = None
+    try:
+        MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not db_conn:
+            raise HTTPException(status_code=500, detail="Database connection failed.")
+        
+        assessments_raw = get_published_assessments_by_teacher(db_conn, teacher_id)
+        
+        return [PublishedAssessmentInfo(**item) for item in assessments_raw]
+        
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+
+async def analyze_assessment_performance_service(assessment_id: int) -> AssessmentAnalysisOutput:
+    db_conn = None
+    try:
+        MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not db_conn:
+            raise HTTPException(status_code=500, detail="Database connection failed.")
+
+        # 1. 数据聚合 (Data Aggregation) - 调用你已有的函数
+        stats_raw = get_assessment_question_stats(db_conn, assessment_id)
+        if not stats_raw:
+            raise HTTPException(status_code=404, detail="No student answer data found for this assessment.")
+
+        # 2. 获取考核的原始题目和标题 (Get Context)
+        assessment_data = get_assessment_content_by_id(db_conn, assessment_id)
+        if not assessment_data:
+            raise HTTPException(status_code=404, detail=f"Assessment with ID {assessment_id} not found.")
+        
+        assessment_title = assessment_data.get('title', 'Untitled Assessment')
+        # 从重构的 content 中分离出 questions_text
+        questions_text = assessment_data.get('content', '').split('---参考答案与解析---')[0].strip()
+
+        # 3. 构造给LLM的提示 (Prompt Engineering)
+        analysis_prompt = f"""
+        你是一位顶级的教育数据分析专家。你的任务是分析一份考核的学情数据，并提供一份简洁、深刻、有洞察力的分析报告。
+
+        **1. 考核基本信息:**
+        - 考核标题: "{assessment_title}"
+
+        **2. 考核题目内容:**
+        ---
+        {questions_text}
+        ---
+
+        **3. 各题作答情况统计:**
+        以下是每个题目的作答情况统计：
+        ```json
+        {json.dumps(stats_raw, indent=2, ensure_ascii=False)}
+        ```
+
+        **你的任务 (必须严格遵守):**
+        请根据以上所有信息，生成一份学情分析报告。你的输出必须是且只能是一个单一的、结构化的JSON对象，格式如下：
+
+        ```json
+        {{
+          "assessment_title": "{assessment_title}",
+          "overall_summary": "（这里是对班级整体表现的概括性总结，比如：整体掌握情况良好，但在...方面存在普遍困难。）",
+          "question_analysis": [
+            {{
+              "question_identifier": "（错误率最高的题号，如 '题目3'）",
+              "question_text": "（该题目的完整题干）",
+              "correct_rate": "（该题的正确率，计算方式为 Correct / Total * 100）",
+              "main_knowledge_point": "（根据题干，提炼出这道题考察的核心知识点或技能）",
+              "common_errors": "（推测学生可能的常见错误或思维误区）"
+            }},
+            // ... (为其他错误率较高的2-3个题目生成类似对象) ...
+          ],
+          "teaching_suggestions": [
+            "（基于以上分析，提出第一条具体的、可操作的教学建议）",
+            "（提出第二条教学建议，例如：可以针对...知识点设计专项练习）",
+            "（提出第三条教学建议，例如：下次授课时可以多举一些...的例子）"
+          ]
+        }}
+        ```
+
+        **分析要点:**
+        - 在 `question_analysis` 中，请重点分析错误率最高或最值得关注的2-4个问题。
+        - `teaching_suggestions` 必须具体、有针对性，能够直接帮助老师改进教学。
+
+        现在，请开始生成你的JSON分析报告。
+        """
+
+        # 4. 调用LLM并解析 (LLM Call & Parsing)
+        parsed_analysis = await parse_query_with_llm(analysis_prompt)
+        
+        if "error" in parsed_analysis or not parsed_analysis.get("question_analysis"):
+            print(f"LLM parsing failed. Raw response: {parsed_analysis}")
+            raise HTTPException(status_code=500, detail="Failed to get a valid analysis from the AI model.")
+
+        # 使用Pydantic模型进行验证和返回
+        return AssessmentAnalysisOutput(**parsed_analysis)
+
+    except HTTPException as he:
+        raise he # 直接重新抛出HTTP异常
+    except Exception as e:
+        print(f"SERVICE ERROR in analyze_assessment_performance_service: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred during analysis: {str(e)}")
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+

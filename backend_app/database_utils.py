@@ -41,7 +41,16 @@ def init_db():
 
     cursor = conn_to_db.cursor()
     try:
-        
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS activity_log (
+        log_id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        user_role VARCHAR(20) NOT NULL COMMENT 'e.g., teacher, student, admin',
+        activity_type VARCHAR(255) NOT NULL COMMENT 'e.g., GENERATE_TEACHING_PLAN, SUBMIT_PRACTICE_ANSWER',
+        details JSON NULL COMMENT 'Optional details, e.g., {"plan_id": 123}',
+        activity_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        """)
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS teachers (
             teacher_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -712,18 +721,18 @@ def get_all_assessment_for_student_view(db_conn: mysql.connector.connection.MySQ
 
 
 def get_assessment_details_by_id(db_conn: mysql.connector.connection.MySQLConnection, assessment_id: int) -> Optional[Dict[str, Any]]:
-    """Retrieves the questions_text of a specific assessment by its ID."""
+
     if not db_conn:
         print("DB_UTILS ERROR: No database connection provided.")
         return None
     try:
         cursor = db_conn.cursor(dictionary=True)
-        # 只查询问题部分，并重命名为 content 以适配前端模型
         query = """
             SELECT 
                 id,
-                questions_text AS content, -- 保持 content 别名以兼容现有逻辑
-                answers_text,             -- 新增获取 answers_text
+                title,
+                questions_text AS content, 
+                answers_text,             
                 subject
             FROM 
                 assessments 
@@ -859,3 +868,424 @@ def get_aggregated_student_performance(db_conn, assessment_id: int) -> list:
     finally:
         if cursor:
             cursor.close()
+
+def log_activity(db_conn, user_id: int, user_role: str, activity_type: str, details: Optional[Dict] = None):
+    """Logs a user activity to the activity_log table."""
+    if not db_conn: return
+    cursor = db_conn.cursor()
+    details_json = json.dumps(details) if details else None
+    try:
+        sql = "INSERT INTO activity_log (user_id, user_role, activity_type, details) VALUES (%s, %s, %s, %s)"
+        cursor.execute(sql, (user_id, user_role, activity_type, details_json))
+        db_conn.commit()
+    except mysql.connector.Error as err:
+        print(f"Error logging activity: {err}")
+        db_conn.rollback()
+    finally:
+        cursor.close()
+
+def get_users_by_role(db_conn, role: str, page: int = 1, page_size: int = 10, search: Optional[str] = None) -> Dict[str, Any]:
+    if role not in ['student', 'teacher']:
+        return {"total": 0, "users": []}
+
+    table_name = "students" if role == 'student' else 'teachers'
+    id_col = "student_id" if role == 'student' else 'teacher_id'
+    name_col = "student_name" if role == 'student' else 'teacher_name'
+    
+    offset = (page - 1) * page_size
+    
+    cursor = db_conn.cursor(dictionary=True)
+    
+    # --- 构建查询 ---
+    count_query = f"SELECT COUNT(*) as total FROM {table_name}"
+    data_query = f"SELECT {id_col} as id, {name_col} as username FROM {table_name}"
+    
+    params = []
+    where_clauses = []
+
+    if search:
+        where_clauses.append(f"{name_col} LIKE %s")
+        params.append(f"%{search}%")
+
+    if where_clauses:
+        query_suffix = " WHERE " + " AND ".join(where_clauses)
+        count_query += query_suffix
+        data_query += query_suffix
+
+    data_query += f" ORDER BY id  LIMIT %s OFFSET %s"
+    
+    try:
+        # --- 增加调试打印 ---
+        print(f"Executing count query: {count_query} with params: {tuple(params)}")
+        cursor.execute(count_query, tuple(params))
+        total_count_result = cursor.fetchone()
+        
+        # --- 增加调试打印 ---
+        if total_count_result:
+            print(f"Total count from DB: {total_count_result['total']}")
+            total_count = total_count_result['total']
+        else:
+            print("Count query returned nothing.")
+            total_count = 0
+            
+        # --- 增加调试打印 ---
+        print(f"Executing data query: {data_query} with params: {tuple(params + [page_size, offset])}")
+        cursor.execute(data_query, tuple(params + [page_size, offset]))
+        users = cursor.fetchall()
+        print(f"Users fetched from DB: {users}")
+        
+        return {"total": total_count, "users": users}
+
+    except mysql.connector.Error as err:
+        print(f"Error getting users by role: {err}")
+        return {"total": 0, "users": []}
+    finally:
+        cursor.close()
+
+def admin_create_user(db_conn, username: str, hashed_password: str, role: str) -> Optional[int]:
+    """
+    管理员在后台创建用户。
+    """
+    if role not in ['student', 'teacher']:
+        return None
+
+    table_name = "students" if role == 'student' else 'teachers'
+    name_col = "student_name" if role == 'student' else 'teacher_name'
+    
+    sql = f"INSERT INTO {table_name} ({name_col}, hashed_password) VALUES (%s, %s)"
+    
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute(sql, (username, hashed_password))
+        db_conn.commit()
+        return cursor.lastrowid
+    except mysql.connector.Error as err:
+        print(f"Error creating user by admin: {err}")
+        db_conn.rollback()
+        return None
+    finally:
+        cursor.close()
+
+def admin_update_user_password(db_conn, user_id: int, new_hashed_password: str, role: str) -> bool:
+    """
+    管理员重置用户密码。
+    """
+    if role not in ['student', 'teacher']:
+        return False
+        
+    table_name = "students" if role == 'student' else 'teachers'
+    id_col = "student_id" if role == 'student' else 'teacher_id'
+
+    sql = f"UPDATE {table_name} SET hashed_password = %s WHERE {id_col} = %s"
+    
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute(sql, (new_hashed_password, user_id))
+        db_conn.commit()
+        return cursor.rowcount > 0 # 返回是否成功更新了行
+    except mysql.connector.Error as err:
+        print(f"Error updating user password by admin: {err}")
+        db_conn.rollback()
+        return False
+    finally:
+        cursor.close()
+
+def admin_delete_user(db_conn, user_id: int, role: str) -> bool:
+    """
+    管理员删除用户。
+    """
+    if role not in ['student', 'teacher']:
+        return False
+
+    table_name = "students" if role == 'student' else 'teachers'
+    id_col = "student_id" if role == 'student' else 'teacher_id'
+
+    sql = f"DELETE FROM {table_name} WHERE {id_col} = %s"
+    
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute(sql, (user_id,))
+        db_conn.commit()
+        return cursor.rowcount > 0 # 返回是否成功删除了行
+    except mysql.connector.Error as err:
+        print(f"Error deleting user by admin: {err}")
+        db_conn.rollback()
+        return False
+    finally:
+        cursor.close()
+
+
+
+def get_teacher_resource_detail(db_conn, resource_type: str, resource_id: int) -> Optional[Dict[str, Any]]:
+
+    details = None
+    if resource_type == 'teaching_plans':
+        plan = get_teaching_plan_by_id(db_conn, resource_id)
+        if plan:
+            # 统一输出格式
+            details = {
+                "id": plan.get('id'),
+                "title": plan.get('title'),
+                "subject": plan.get('subject'),
+                "full_content": plan.get('content', '')
+            }
+    elif resource_type == 'assessments':
+        assessment = get_assessment_details_by_id(db_conn, resource_id)
+        if assessment:
+            questions = assessment.get('content', '') 
+            answers = assessment.get('answers_text', '')
+            details = {
+                "id": assessment.get('id'),
+                "title": assessment.get('title'), 
+                "subject": assessment.get('subject'),
+                "full_content": f"{questions}\n\n---参考答案与解析---\n\n{answers}"
+            }
+    return details
+
+def get_all_subjects(db_conn) -> List[str]:
+    """获取系统中所有不重复的学科列表。"""
+    cursor = db_conn.cursor()
+    # 从两个表中分别查询学科，然后合并去重
+    query = """
+        (SELECT DISTINCT subject FROM teaching_plans WHERE subject IS NOT NULL AND subject != '')
+        UNION
+        (SELECT DISTINCT subject FROM assessments WHERE subject IS NOT NULL AND subject != '')
+    """
+    try:
+        cursor.execute(query)
+        # fetchall() 返回的是元组列表，例如 [('数学',), ('物理',)]
+        # 我们需要将其转换为字符串列表
+        subjects = [row[0] for row in cursor.fetchall()]
+        return subjects
+    except mysql.connector.Error as err:
+        print(f"Error getting all subjects: {err}")
+        return []
+    finally:
+        cursor.close()
+
+def get_unified_resources_by_subject(db_conn, subject: str, page: int = 1, page_size: int = 10, search: Optional[str] = None) -> Dict[str, Any]:
+
+    offset = (page - 1) * page_size
+    cursor = db_conn.cursor(dictionary=True)
+
+    plans_query = """
+        SELECT
+            tp.id,
+            tp.title,
+            tp.created_at,
+            tp.subject,
+            t.teacher_name AS creator,
+            'teaching_plan' AS resource_type
+        FROM teaching_plans AS tp
+        LEFT JOIN teachers t ON tp.teacher_id = t.teacher_id
+    """
+    
+    # 考核部分
+    assessments_query = """
+        SELECT
+            a.id,
+            a.title,
+            a.created_at,
+            a.subject,
+            t.teacher_name AS creator,
+            'assessment' AS resource_type
+        FROM assessments AS a
+        LEFT JOIN teachers t ON a.teacher_id = t.teacher_id
+    """
+    
+    # 基础的统一视图查询
+    unified_view_query = f"({plans_query}) UNION ALL ({assessments_query})"
+
+    # --- 在统一视图上进行筛选、搜索和分页 ---
+    
+    # WHERE 条件
+    where_clauses = ["subject = %s"] # 按学科筛选是基本条件
+    params = [subject]
+
+    if search:
+
+        where_clauses.append("title LIKE %s")
+        params.append(f"%{search}%")
+
+
+    final_query_suffix = " WHERE " + " AND ".join(where_clauses)
+    
+
+    count_query = f"SELECT COUNT(*) as total FROM ({unified_view_query}) AS unified_resources" + final_query_suffix
+    
+
+    data_query = f"SELECT * FROM ({unified_view_query}) AS unified_resources" + final_query_suffix + " ORDER BY created_at  LIMIT %s OFFSET %s"
+
+    try:
+
+        cursor.execute(count_query, tuple(params))
+        total_count_result = cursor.fetchone()
+        total_count = total_count_result['total'] if total_count_result else 0
+        
+
+        cursor.execute(data_query, tuple(params + [page_size, offset]))
+        resources = cursor.fetchall()
+        
+        return {"total": total_count, "resources": resources}
+
+    except mysql.connector.Error as err:
+        print(f"Error getting unified resources for subject '{subject}': {err}")
+        return {"total": 0, "resources": []}
+    finally:
+        cursor.close()
+
+def get_activity_stats(db_conn, period: str) -> List[Dict]:
+    if period == 'daily':
+        interval_clause = "activity_timestamp >= CURDATE()"
+    elif period == 'weekly':
+        # WEEK(NOW()) 和 WEEK(activity_timestamp) 确保是在本周
+        interval_clause = "YEARWEEK(activity_timestamp, 1) = YEARWEEK(NOW(), 1)"
+    else:
+        return []
+
+    sql = f"""
+        SELECT 
+            user_role,
+            activity_type,
+            COUNT(*) as count
+        FROM activity_log
+        WHERE {interval_clause}
+        GROUP BY user_role, activity_type
+        ORDER BY user_role, count DESC;
+    """
+    cursor = db_conn.cursor(dictionary=True)
+    try:
+        cursor.execute(sql)
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error getting activity stats for period '{period}': {err}")
+        return []
+    finally:
+        cursor.close()
+
+def get_teacher_content_creation_stats(db_conn) -> List[Dict]:
+    activity_types = (
+        'GENERATE_TEACHING_PLAN', 
+        'REFINE_TEACHING_PLAN',
+        'GENERATE_ASSESSMENT',
+        'REFINE_ASSESSMENT'
+    )
+    
+    sql = """
+        SELECT
+            t.teacher_id,
+            t.teacher_name,
+            al.activity_type,
+            COUNT(al.log_id) as count
+        FROM activity_log al
+        JOIN teachers t ON al.user_id = t.teacher_id
+        WHERE al.user_role = 'teacher' AND al.activity_type IN %s
+        GROUP BY t.teacher_id, t.teacher_name, al.activity_type
+        ORDER BY t.teacher_id;
+    """
+    
+    cursor = db_conn.cursor(dictionary=True)
+    try:
+        cursor.execute(sql, (activity_types,))
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error getting teacher content creation stats: {err}")
+        return []
+    finally:
+        cursor.close()
+
+def get_low_performing_subjects(db_conn, limit: int = 5) -> List[Dict]:
+    sql = """
+        SELECT
+            a.subject,
+            AVG(CASE 
+                WHEN saa.llm_assessed_correctness = 'Correct' THEN 100
+                WHEN saa.llm_assessed_correctness = 'Partially Correct' THEN 50
+                ELSE 0 
+            END) as average_score,
+            COUNT(DISTINCT saa.student_id) as student_count,
+            COUNT(saa.answer_id) as total_answers
+        FROM assessments a
+        JOIN student_assessment_answers saa ON a.id = saa.assessment_id
+        WHERE a.subject IS NOT NULL AND a.subject != ''
+        GROUP BY a.subject
+        HAVING total_answers > 5 -- 只统计有一定作答量的学科
+        ORDER BY average_score ASC
+        LIMIT %s;
+    """
+    cursor = db_conn.cursor(dictionary=True)
+    try:
+        cursor.execute(sql, (limit,))
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error getting low performing subjects: {err}")
+        return []
+    finally:
+        cursor.close()
+
+def get_daily_accuracy_trend(db_conn) -> List[Dict]:
+
+    sql = """
+        SELECT 
+            DATE(attempt_timestamp) as date,
+            AVG(CAST(REPLACE(correctness_assessment, '%', '') AS DECIMAL(5,2))) as average_accuracy
+        FROM practice_attempts
+        WHERE 
+            correctness_assessment IS NOT NULL 
+            AND correctness_assessment LIKE '%_%%' -- 确保是百分比格式
+        GROUP BY DATE(attempt_timestamp)
+        ORDER BY date ASC
+        LIMIT 30; -- 最近30天
+    """
+    cursor = db_conn.cursor(dictionary=True)
+    try:
+        cursor.execute(sql)
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error getting daily accuracy trend: {err}")
+        return []
+    finally:
+        cursor.close()
+
+def get_all_practice_attempts_with_concepts(db_conn) -> List[Dict]:
+    sql = """
+        SELECT 
+            pqc.concepts_covered,
+            pa.correctness_assessment
+        FROM practice_attempts pa
+        JOIN practice_questions_catalog pqc ON pa.catalog_id = pqc.catalog_id
+        WHERE pqc.concepts_covered IS NOT NULL AND pqc.concepts_covered != '[]'
+    """
+    cursor = db_conn.cursor(dictionary=True)
+    try:
+        cursor.execute(sql)
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error getting all practice attempts with concepts: {err}")
+        return []
+    finally:
+        cursor.close()
+
+def get_published_assessments_by_teacher(db_conn, teacher_id: int) -> List[Dict[str, Any]]:
+    if not db_conn: return []
+    cursor = db_conn.cursor(dictionary=True)
+    results = []
+    try:
+        sql = """
+            SELECT 
+                a.id, 
+                a.title, 
+                a.subject, 
+                a.created_at
+            FROM assessments a
+            JOIN published_assessments pa ON a.id = pa.assessment_id
+            WHERE a.teacher_id = %s
+            ORDER BY pa.published_at DESC;
+        """
+        cursor.execute(sql, (teacher_id,))
+        results = cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error fetching published assessments for teacher {teacher_id}: {err}")
+    finally:
+        cursor.close()
+    return results

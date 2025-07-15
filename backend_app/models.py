@@ -1,8 +1,9 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Union
+from typing import List, Literal, Optional, Dict, Union
 
 
-from datetime import datetime
+from datetime import datetime,date
+AdminResourceType = Literal['teaching_plans', 'assessments']
 class StudentPerformanceDetail(BaseModel):
     answer_id: int
     assessment_id: int
@@ -15,8 +16,8 @@ class StudentPerformanceDetail(BaseModel):
     submission_timestamp: datetime
 
 class StudentQuestionInput(BaseModel):
-    question: str = Field(..., example="Explain the concept of photosynthesis.")
-    student_id: Optional[int] = Field(None, example=123, description="Optional student ID for history tracking.")
+    question: str 
+    student_id: Optional[int] 
 
 
 class StudentQuestionOutput(BaseModel):
@@ -26,15 +27,12 @@ class StudentQuestionOutput(BaseModel):
     error_message: Optional[str] = None
 
 class TeachingPlanInput(BaseModel):
-    teacher_id: Optional[int] = Field(None, example=1, description="ID of the teacher requesting the plan.")
-    subject: str = Field(..., example="High School Biology")
-    teaching_outline: str = Field(..., example="Week 1: Cell Structure, Week 2: Photosynthesis...")
-    title_for_db: Optional[str] = Field(None, example="My Biology Q1 Plan", description="Optional title for saving the plan to the database.")
-    style_tone: Optional[str] = Field(None, example="Engaging and interactive for 10th graders.")
-    output_structure: Optional[str] = Field(
-        "Please include: 1. Key Concepts; 2. Weekly Breakdown; 3. Example Activities; 4. Assessment Ideas.",
-        example="1. Key Concepts; 2. Weekly Breakdown; 3. Example Activities; 4. Assessment Ideas."
-    )
+    teacher_id: Optional[int] 
+    subject: str 
+    teaching_outline: str 
+    title_for_db: Optional[str] 
+    style_tone: Optional[str] 
+    output_structure: Optional[str] 
 
 class TeachingPlanOutput(BaseModel):
     teaching_plan_id: Optional[int] = None 
@@ -44,14 +42,11 @@ class TeachingPlanOutput(BaseModel):
     error_message: Optional[str] = None
 
 class AssessmentInput(BaseModel):
-    teacher_id: Optional[int] = Field(None, example=1)
-    subject: Optional[str] = Field(None, example="Computer Science", description="The subject area.") 
-    teaching_plan_content: str = Field(..., example="Content on Photosynthesis...")
-    question_preferences: Dict[str, int] = Field(
-        default_factory=dict,
-        example={"multiple-choice": 3}
-    )
-    title_for_db: Optional[str] = Field(None, example="Photosynthesis Quiz")
+    teacher_id: Optional[int] 
+    subject: Optional[str] 
+    teaching_plan_content: str 
+    question_preferences: Dict[str, int] 
+    title_for_db: Optional[str] 
 
 class AssessmentOutput(BaseModel):
     assessment_id: Optional[int] = None 
@@ -62,12 +57,12 @@ class AssessmentOutput(BaseModel):
     error_message: Optional[str] = None
 
 class StudentAssessmentAnswerItem(BaseModel):
-    question_identifier: str = Field(..., example="Question 1")
-    student_answer_text: str = Field(..., example="Paris is the capital of France.")
+    question_identifier: str 
+    student_answer_text: str 
 
 class StudentAssessmentInput(BaseModel):
-    student_id: Optional[int] = Field(None, example=123)
-    assessment_id: int = Field(..., example=1)
+    student_id: Optional[int] 
+    assessment_id: int 
     answers: List[StudentAssessmentAnswerItem]
 
 class StudentAssessmentEvaluationOutput(BaseModel): 
@@ -81,12 +76,9 @@ class StudentAssessmentEvaluationOutput(BaseModel):
     error_message: Optional[str] = None
 
 class PracticeQuestionsInput(BaseModel):
-    student_id: Optional[int] = Field(None, example=123) 
-    practice_topic: str = Field(..., example="Python list comprehensions")
-    question_preferences: Dict[str, int] = Field(
-        default_factory=lambda: {"multiple-choice": 1, "short-answer": 1, "programming": 1},
-        example={"programming": 2, "short-answer": 1}
-    )
+    student_id: Optional[int] 
+    practice_topic: str 
+    question_preferences: Dict[str, int] 
     
 
 class PracticeQuestionItem(BaseModel): 
@@ -99,8 +91,8 @@ class PracticeQuestionsOutput(BaseModel):
     error_message: Optional[str] = None
 
 class PracticeFeedbackInput(BaseModel):
-    student_id: int = Field(..., example=123)
-    catalog_id: int = Field(..., example=101) 
+    student_id: int 
+    catalog_id: int 
     student_answer: str
 
 
@@ -111,45 +103,44 @@ class FeedbackItem(BaseModel):
     feedback: str
 class PracticeFeedbackOutput(BaseModel):
     attempt_id: int
-    overall_comment: str  # 对学生本次作答的总体评价
-    feedback_details: List[FeedbackItem] # 每个问题的详细反馈列表
-    error_message: Optional[str] = None
+    overall_comment: str  
+    feedback_details: List[FeedbackItem] #
+    error_message: Optional[str] 
 
 class TeachingPlanNLInput(BaseModel):
-    query: str = Field(..., example="Generate a high school biology teaching plan about cell division for Dr. Evo. Make it engaging.")
-    teacher_id: int = Field(None, description="Optional teacher ID if known, e.g., from session.")
+    query: str 
+    teacher_id: int 
 
 class PracticeQuestionNLInput(BaseModel):
-    query: str = Field(..., example="Generate some python list comprehension questions, maybe 2 multiple choice and 1 programming.")
-    student_id: Optional[int] = Field(None, description="Optional student ID for history personalization.")
+    query: str 
+    student_id: Optional[int] 
 
 
 class AssessmentNLInput(BaseModel):
-    query: str = Field(..., example="Generate an assessment for Prof. Oak based on the Kanto region Pokedex, Gym Leaders, and Elite Four. Include 2 multiple-choice and 1 short-answer. Title it 'Kanto Basics Quiz'.")
-    teacher_id: Optional[int] = Field(None, description="Optional teacher ID if known.")
+    query: str 
+    teacher_id: Optional[int] 
 
 class StudentAssessmentNLInput(BaseModel):
-    query: str = Field(..., example="For assessment 12, student John Doe (id 77) answered: Q1 was 'Paris', Section B Q2 was 'The mitochondria is the powerhouse of the cell'.")
-    student_id: Optional[int] = Field(None, description="Student ID, if known and can be extracted or provided separately.")
-    assessment_id: int = Field(..., description="ID of the assessment being evaluated.")
-
+    query: str 
+    student_id: Optional[int] 
+    assessment_id: int 
 
 
 class Message(BaseModel):
     message: str
 
 class UserBase(BaseModel):
-    username: str = Field(..., example="john_doe")
+    username: str 
 
 class UserCreate(UserBase):
-    username: str = Field(..., example="john_doe")
-    password: str = Field(..., example="securepassword123")
+    username: str 
+    password: str 
     repassword:str
     role: int
 
 class UserLogin(BaseModel):
-    username: str = Field(..., example="john_doe")
-    password: str = Field(..., example="securepassword123")
+    username: str 
+    password: str 
     role: int
 
 class TokenData(BaseModel):
@@ -168,7 +159,7 @@ class Token(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: str  # e.g., "user", "assistant", "system"
+    role: str  
     content: str
 
 class RefineStudentQAInput(BaseModel):
@@ -178,26 +169,26 @@ class RefineStudentQAInput(BaseModel):
     student_id: Optional[int] = None
 
 class RefineTeachingPlanInput(BaseModel):
-    base_teaching_plan_id: int = Field(None, description="The ID of the teaching plan being refined. If null, a new plan will be created based on history.")
+    base_teaching_plan_id: int 
     history: List[ChatMessage]
     new_query: str
     teacher_id: Optional[int] = None
 
 class RefineAssessmentInput(BaseModel):
-    base_assessment_id: Optional[int] = Field(None, description="The ID of the assessment being refined. If null, a new assessment will be created based on history.")
+    base_assessment_id: Optional[int] 
     history: List[ChatMessage]
     new_query: str
     teacher_id: Optional[int] = None
 
 class PracticeQuestionListItem(BaseModel):
     id: int
-    title: str = Field(..., description="A concise title for the practice set, derived from its concepts or content.")
+    title: str 
 
 
 class PracticeQuestionListOutput(BaseModel):
     questions: List[PracticeQuestionListItem]
 
-# 新增：练习详情接口的响应模型
+
 class PracticeQuestionDetailOutput(BaseModel):
     id: int
     content: str
@@ -229,7 +220,7 @@ class StudentAssessmentSummary(BaseModel):
     correct_count: int
     partially_correct_count: int
     incorrect_count: int
-    accuracy: float = Field(..., example=87.5, description="Accuracy score, calculated as (Correct * 1 + Partially Correct * 0.5) / Total * 100")
+    accuracy: float 
 
 class PublishAssessment(BaseModel):
     teacher_id:int
@@ -237,22 +228,140 @@ class PublishAssessment(BaseModel):
 
 class PracticeChatInput(BaseModel):
     student_id: int
-    # 关键：前端需要传递整个对话历史
+
     history: List[ChatMessage]
-    # 用户的最新一条消息
+
     new_query: str
-    # 关键：前端需要告知当前正在回答的是哪个题库的题
-    # 第一次生成时为None，之后应为返回的catalog_id
+
     active_catalog_id: Optional[int] = None
 
 class PracticeChatOutput(BaseModel):
-    # AI的文本回复，例如 "好的，我已经把题目改难了："
+
     assistant_response_text: str
-    # 检测到的用户意图，方便前端调试或做特定UI处理
+
     intent_detected: str
-    # 如果AI生成了新题目，这里会有内容
+
     new_questions: Optional[PracticeQuestionsOutput] = None
-    # 如果AI给出了反馈，这里会有内容
+
     feedback: Optional[PracticeFeedbackOutput] = None
-    # 任何可能发生的错误
+
+    error_message: Optional[str] = None
+
+class AdminUserView(BaseModel):
+    id: int
+    username: str
+
+
+class PaginatedUsersResponse(BaseModel):
+    total: int
+    users: List[AdminUserView]
+
+class AdminCreateUserInput(BaseModel):
+    username: str
+    password: str
+    role: Literal['student', 'teacher']
+
+class AdminResetPasswordInput(BaseModel):
+    new_password: str
+
+class AdminResourceView(BaseModel):
+    id: int
+    title: Optional[str]
+    creator: Optional[str]
+    subject: Optional[str]
+    created_at: datetime
+    resource_type: str 
+
+class PaginatedAdminResourcesResponse(BaseModel):
+    total: int
+    resources: List[AdminResourceView]
+
+
+class AdminResourceDetailView(BaseModel):
+    id: int
+    title: Optional[str]
+    subject: Optional[str]
+    full_content: str
+
+class ActivityStat(BaseModel):
+    activity_type: str
+    count: int
+
+class UsageStats(BaseModel):
+    teacher: List[ActivityStat]
+    student: List[ActivityStat]
+
+class DashboardUsageResponse(BaseModel):
+    daily: UsageStats
+    weekly: UsageStats
+
+class TeacherEfficiencyStat(BaseModel):
+    teacher_id: int
+    teacher_name: str
+    
+
+    plans_created: int = 0
+    assessments_created: int = 0
+    
+
+    plans_refined: int = 0
+    assessments_refined: int = 0
+    
+
+    plan_efficiency_index: float 
+    assessment_efficiency_index: float 
+
+class SubjectPerformance(BaseModel):
+    subject: str
+    average_score: float
+    student_count: int
+    total_answers: int
+
+class DailyAccuracy(BaseModel):
+    date: date
+    average_accuracy: float
+
+class ConceptStat(BaseModel):
+    concept: str
+    mastery_rate: float 
+    total_attempts: int
+    incorrect_attempts: int
+
+class StudentEffectivenessResponse(BaseModel):
+    accuracy_trend: List[DailyAccuracy]
+    weakest_concepts: List[ConceptStat] 
+
+
+class PublishedAssessmentInfo(BaseModel):
+    id: int
+    title: str
+    subject: Optional[str] = None
+    created_at: datetime
+
+
+class QuestionAnalysisDetail(BaseModel):
+    question_identifier: str = Field(..., description="The identifier of the question, e.g., '题目1'.")
+    question_text: str = Field(..., description="The actual text of the question for context.")
+    correct_rate: float = Field(..., description="The correct rate for this question (0.0 to 100.0).")
+    main_knowledge_point: str = Field(..., description="The key knowledge point or skill tested by this question, inferred by the LLM.")
+    common_errors: Optional[str] = Field(None, description="A summary of common student errors for this question, if identifiable.")
+
+
+class AssessmentAnalysisOutput(BaseModel):
+    assessment_title: str
+    overall_summary: str = Field(..., description="A high-level summary of the class's performance on this assessment.")
+    question_analysis: List[QuestionAnalysisDetail] = Field(..., description="A detailed analysis of the most problematic questions.")
+    teaching_suggestions: List[str] = Field(..., description="Actionable teaching suggestions based on the analysis.")
+    error_message: Optional[str] = None
+
+
+
+# 学情分析报告的最终输出模型
+class AssessmentAnalysis(BaseModel):
+    assessment_title: str = Field(..., description="被分析的考核的标题")
+    overall_summary: str = Field(..., description="对班级整体表现的概括性总结，例如：整体掌握情况良好，但在...方面存在普遍困难。")
+    strength_points: List[str] = Field(..., description="学生普遍掌握得比较好的知识点列表")
+    weakness_points: List[str] = Field(..., description="学生普遍存在的薄弱知识点列表")
+    problematic_questions: List[QuestionAnalysisDetail] = Field(..., description="对错误率最高或最值得关注的几个问题的详细分析列表")
+    teaching_suggestions: List[str] = Field(..., description="基于以上所有分析，给出的具体、可操作的教学建议列表")
     error_message: Optional[str] = None

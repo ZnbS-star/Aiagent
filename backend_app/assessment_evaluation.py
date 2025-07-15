@@ -37,13 +37,9 @@ def get_assessment_content_by_id(db_conn, assessment_id):
         assessment_data = cursor.fetchone()
         
         if assessment_data:
-            # --- 关键修改：在内存中重构完整的'content' ---
-            # 评估模块需要一个包含问题和标准答案的完整上下文
             questions = assessment_data.get('questions_text', '')
             answers = assessment_data.get('answers_text', '')
             
-            # 仿照我们之前约定的格式，将问题和答案拼接起来
-            # 这为评估LLM提供了它所期望的完整输入格式
             assessment_data['content'] = f"{questions}\n\n---参考答案与解析---\n\n{answers}"
             
             # （可选）可以删除原始字段，避免混淆
@@ -55,7 +51,7 @@ def get_assessment_content_by_id(db_conn, assessment_id):
             print(f"No assessment found with ID: {assessment_id}")
             return None
     except mysql.connector.Error as err:
-        # 错误日志保持不变，但现在应该能正确执行了
+
         print(f"Error retrieving assessment with ID {assessment_id}: {err}")
         return None
     except Exception as e:

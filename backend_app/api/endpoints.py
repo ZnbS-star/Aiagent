@@ -1,19 +1,34 @@
 from datetime import datetime
-from fastapi import APIRouter,  HTTPException, Body
+from fastapi import APIRouter,  HTTPException, Body, Query
+from fastapi.responses import StreamingResponse
+import urllib
 from backend_app.auth_service import unified_register_service, unified_login_service
 from backend_app.models import (
-    PracticeQuestionDetailOutput, PracticeQuestionListOutput, PublishAssessment, StudentAssessmentSummary, StudentQuestionInput, StudentQuestionOutput, TeacherAssessmentListOutput, 
+    AdminCreateUserInput, AdminResetPasswordInput, AdminResourceDetailView, AdminResourceType, AssessmentAnalysisOutput, DashboardUsageResponse, PaginatedAdminResourcesResponse, PaginatedUsersResponse, PracticeQuestionDetailOutput, PracticeQuestionListOutput, PublishAssessment, PublishedAssessmentInfo, StudentAssessmentSummary, StudentEffectivenessResponse, StudentQuestionInput, StudentQuestionOutput, SubjectPerformance, TeacherAssessmentListOutput, TeacherEfficiencyStat, 
     TeachingPlanNLInput, TeachingPlanOutput, 
     AssessmentInput, AssessmentNLInput, AssessmentOutput, 
     StudentAssessmentInput, StudentAssessmentNLInput,  StudentAssessmentAnswerItem, 
     PracticeQuestionsInput, PracticeQuestionNLInput, PracticeQuestionsOutput, 
-    PracticeFeedbackInput,  PracticeFeedbackOutput, 
-    Message, StudentPerformanceDetail, Token, UserCreate, UserLogin,
+    Message, Token, UserCreate, UserLogin,
     RefineStudentQAInput, RefineTeachingPlanInput, RefineAssessmentInput,
     PracticeChatInput, PracticeChatOutput, 
 )
 from backend_app.services import (
-    process_practice_chat_service, # 新增
+    analyze_assessment_performance_service,
+    analyze_assessment_service,
+    create_user_by_admin_service,
+    delete_user_service,
+    export_resources_by_subject_service,
+    get_dashboard_usage_service,
+    get_low_performing_subjects_service,
+    get_student_effectiveness_service,
+    get_teacher_published_assessments_service,
+    get_teacher_resource_detail_service,
+    get_teaching_efficiency_service,
+    list_all_subjects_service,
+    list_resources_by_subject_service,
+    list_users_service,
+    process_practice_chat_service, 
     get_assessment_detail_service,
     get_assessment_list_service,
     get_teacher_assessments_service,
@@ -23,16 +38,16 @@ from backend_app.services import (
     evaluate_student_assessment_answers_service,
     get_student_assessment_performance_service, 
     generate_practice_questions_service,
-    get_practice_feedback_service,
     publish_assessment_service,
     refine_assessment_service,
     refine_student_question_service,
-    refine_teaching_plan_service
+    refine_teaching_plan_service,
+    reset_user_password_service
 )
 from backend_app.nlp_utils import parse_query_with_llm 
-from typing import List
+from typing import List, Literal, Optional
 import os
-from backend_app.database_utils import get_mysql_connection, get_question_identifiers_from_assessment, save_teaching_plan,save_assessment
+from backend_app.database_utils import get_mysql_connection, get_question_identifiers_from_assessment, log_activity, save_teaching_plan,save_assessment
 
 router = APIRouter()
 
@@ -188,6 +203,14 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput):
             subject=subject  
         )
         if plan_id:
+            if final_teacher_id: # 只有在知道用户ID时才记录
+                log_activity(
+                    db_conn,
+                    user_id=final_teacher_id,
+                    user_role="teacher",
+                    activity_type="GENERATE_TEACHING_PLAN",
+                    details={"plan_id": plan_id, "title": title_to_save}
+                )
             return TeachingPlanOutput(
                 teaching_plan_id=plan_id,
                 title=title_to_save,
@@ -226,7 +249,7 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput):
 async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
     db_conn = None
     try:
-        full_generated_content, rag = await refine_teaching_plan_service(input_data)
+        full_generated_content, _ = await refine_teaching_plan_service(input_data)
 
         if not full_generated_content:
             raise HTTPException(status_code=500, detail="Failed to generate refined teaching plan content.")
@@ -253,6 +276,13 @@ async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
 
 
         if new_plan_id:
+            log_activity(
+                    db_conn,
+                    user_id=input_data.teacher_id,
+                    user_role="teacher",
+                    activity_type="REFINE_TEACHING_PLAN", 
+                    details={"plan_id": new_plan_id, "title": new_title}
+            )
             return TeachingPlanOutput(
                 teaching_plan_id=new_plan_id, 
                 title=new_title,
@@ -345,6 +375,13 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
             subject=subject    
         )
         if assessment_id:
+            log_activity(
+                    db_conn,
+                    user_id=input_data.teacher_id,
+                    user_role="teacher",
+                    activity_type="GENERATE_ASSESSMENT",
+                    details={"assessment_id": assessment_id, "title": title_to_save}
+                )
             return AssessmentOutput(
                 assessment_id=assessment_id,
                 title=title_to_save,
@@ -413,14 +450,21 @@ async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
         new_assessment_id = save_assessment(
             db_conn,
             new_title,
-            questions_part,      # ## 修改点4: 只保存问题部分到 content
-            answers_part,        # ## 修改点5: 将答案部分保存到 answers 字段
+            questions_part,      
+            answers_part,        
             input_data.teacher_id,
-            subject=subject # ## 修改点6: 保存学科
+            subject=subject 
             
         )
 
         if new_assessment_id:
+            log_activity(
+                    db_conn,
+                    user_id=input_data.teacher_id,
+                    user_role="teacher",
+                    activity_type="REFINE_ASSESSMENT",
+                    details={"assessment_id": new_assessment_id, "title": new_title}
+                )
             return AssessmentOutput(
                 assessment_id=new_assessment_id,
                 title=new_title,
@@ -669,7 +713,7 @@ async def generate_practice_questions_endpoint(input_data: PracticeQuestionNLInp
         print(f"API ERROR: An unexpected error occurred in /practice-questions/generate/ endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
-# 新增：处理练习助手持续对话的核心接口
+
 @router.post(
     "/practice-assistant/chat",
     response_model=PracticeChatOutput,
@@ -766,7 +810,7 @@ async def get_assessment_detail_endpoint(assessment_id: int): # <-- 参数名也
 )
 
 async def get_teacher_assessments_endpoint(teacher_id: int): 
-    # teacher_id = current_user.id
+
     return await get_teacher_assessments_service(teacher_id)
 
 
@@ -778,3 +822,154 @@ async def get_teacher_assessments_endpoint(teacher_id: int):
 )
 async def publish_assessment_endpoint(inputdata:PublishAssessment =Body): 
     return await publish_assessment_service(inputdata.assessment_id,inputdata.teacher_id)
+
+@router.get(
+    "/admin/users", 
+    response_model=PaginatedUsersResponse, 
+    summary="[Admin] Get a paginated list of users"
+)
+async def admin_get_users(
+    role: Literal['student', 'teacher'],
+    page: int = 1,
+    page_size: int = Query(10, ge=1, le=100),
+    search: Optional[str] = None
+):
+
+    return await list_users_service(role, page, page_size, search)
+
+@router.post(
+    "/admin/users",
+    status_code=201,
+    summary="[Admin] Create a new user"
+)
+async def admin_create_user_endpoint(user_data: AdminCreateUserInput):
+
+    return await create_user_by_admin_service(user_data)
+
+@router.put(
+    "/admin/users/{role}/{user_id}/reset-password",
+    summary="[Admin] Reset a user's password"
+)
+async def admin_reset_password_endpoint(
+    role: Literal['student', 'teacher'], 
+    user_id: int, 
+    password_data: AdminResetPasswordInput
+):
+
+    return await reset_user_password_service(user_id, role, password_data)
+
+@router.delete(
+    "/admin/users/{role}/{user_id}",
+    status_code=204,
+    summary="[Admin] Delete a user"
+)
+async def admin_delete_user_endpoint(
+    role: Literal['student', 'teacher'], 
+    user_id: int
+):
+
+    return await delete_user_service(user_id, role)
+    
+
+@router.get(
+    "/admin/subjects", 
+    response_model=List[str],
+    summary="[Admin] Get a list of all subjects"
+)
+async def admin_get_all_subjects():
+    return await list_all_subjects_service()
+
+@router.get(
+    "/admin/resources/by-subject/{subject}", 
+    response_model=PaginatedAdminResourcesResponse,
+    summary="[Admin] Get a paginated list of resources for a specific subject"
+)
+async def admin_get_resources_by_subject(
+    subject: str,
+    page: int = 1,
+    page_size: int = Query(10, ge=1, le=100),
+    search: Optional[str] = None
+):
+
+    return await list_resources_by_subject_service(subject, page, page_size, search)
+
+@router.get(
+    "/admin/resources/{resource_type}/{resource_id}",
+    response_model=AdminResourceDetailView,
+    summary="[Admin] Get details of a specific teacher resource"
+)
+async def admin_get_teacher_resource_detail(resource_type: AdminResourceType, resource_id: int):
+    return await get_teacher_resource_detail_service(resource_type, resource_id)
+
+@router.get(
+    "/admin/resources/by-subject/{subject}/export",
+    summary="[Admin] Export resources for a subject to CSV"
+)
+async def admin_export_resources_by_subject_endpoint(
+    subject: str, 
+    search: Optional[str] = None
+):
+    csv_data = await export_resources_by_subject_service(subject, search)
+    response = StreamingResponse(iter([csv_data]), media_type="text/csv")
+    original_filename = f"resources_{subject}_{datetime.now().strftime('%Y%m%d')}.csv"
+    
+
+    encoded_filename = urllib.parse.quote(original_filename)
+    
+    response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_filename}"
+    return response
+
+@router.get(
+    "/admin/dashboard/usage-stats",
+    response_model=DashboardUsageResponse,
+    summary="[Admin Dashboard] Get daily and weekly usage statistics"
+)
+async def admin_get_usage_stats():
+    return await get_dashboard_usage_service()
+
+@router.get(
+    "/admin/dashboard/teaching-efficiency",
+    response_model=List[TeacherEfficiencyStat],
+    summary="[Admin Dashboard] Get teaching efficiency statistics"
+)
+async def admin_get_teaching_efficiency():
+
+    return await get_teaching_efficiency_service()
+
+@router.get(
+    "/admin/dashboard/low-performing-subjects",
+    response_model=List[SubjectPerformance],
+    summary="[Admin Dashboard] Get subjects with the lowest average scores"
+)
+async def admin_get_low_performing_subjects():
+
+    return await get_low_performing_subjects_service()
+
+@router.get(
+    "/admin/dashboard/student-effectiveness",
+    response_model=StudentEffectivenessResponse,
+    summary="[Admin Dashboard] Get student learning effectiveness metrics"
+)
+async def admin_get_student_effectiveness():
+
+    return await get_student_effectiveness_service()
+
+@router.get(
+    "/teacher/{teacher_id}/published-assessments",
+    response_model=List[PublishedAssessmentInfo],
+    summary="[Teacher] Get all published assessments for learning analysis",
+    tags=["Teacher Toolkit Features"]
+)
+async def get_teacher_published_assessments_endpoint(teacher_id: int):
+
+    return await get_teacher_published_assessments_service(teacher_id)
+
+@router.get(
+    "/assessments/{assessment_id}/analysis",
+    response_model=AssessmentAnalysisOutput,
+    summary="[Teacher] Get a detailed learning analysis for an assessment",
+    tags=["Teacher Toolkit Features"]
+)
+async def get_assessment_analysis_endpoint(assessment_id: int):
+
+    return await analyze_assessment_performance_service(assessment_id)
