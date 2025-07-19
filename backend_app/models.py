@@ -85,10 +85,7 @@ class PracticeQuestionItem(BaseModel):
     question_text: str 
     model_answer: str
 
-class PracticeQuestionsOutput(BaseModel):
-    generated_questions: List[PracticeQuestionItem]
-    catalog_id: Optional[int] = None
-    error_message: Optional[str] = None
+
 
 class PracticeFeedbackInput(BaseModel):
     student_id: int 
@@ -96,16 +93,8 @@ class PracticeFeedbackInput(BaseModel):
     student_answer: str
 
 
-class FeedbackItem(BaseModel):
-    question_identifier: str
-    student_answer: str
-    correctness: str
-    feedback: str
-class PracticeFeedbackOutput(BaseModel):
-    attempt_id: int
-    overall_comment: str  
-    feedback_details: List[FeedbackItem] #
-    error_message: Optional[str] 
+
+
 
 class TeachingPlanNLInput(BaseModel):
     query: str 
@@ -235,6 +224,22 @@ class PracticeChatInput(BaseModel):
 
     active_catalog_id: Optional[int] = None
 
+class FeedbackItem(BaseModel):
+    question_identifier: str
+    student_answer: str
+    correctness: str
+    feedback: str
+
+class PracticeFeedbackOutput(BaseModel):
+    attempt_id: int
+    overall_comment: str  
+    feedback_details: List[FeedbackItem] #
+    error_message: Optional[str] 
+
+class PracticeQuestionsOutput(BaseModel):
+    generated_questions: PracticeQuestionItem
+    catalog_id: Optional[int] = None
+    error_message: Optional[str] = None
 class PracticeChatOutput(BaseModel):
 
     assistant_response_text: str
@@ -319,7 +324,7 @@ class SubjectPerformance(BaseModel):
 
 class DailyAccuracy(BaseModel):
     date: date
-    average_accuracy: float
+    average_accuracy: Optional[float] = None
 
 class ConceptStat(BaseModel):
     concept: str
@@ -354,14 +359,20 @@ class AssessmentAnalysisOutput(BaseModel):
     teaching_suggestions: List[str] = Field(..., description="Actionable teaching suggestions based on the analysis.")
     error_message: Optional[str] = None
 
+class QuestionAnalysis(BaseModel):
+    question_identifier: str = Field(..., description="问题的标识符, 例如 '题目1'")
+    question_text: str = Field(..., description="该问题的实际文本，用于上下文展示")
+    correct_rate: float = Field(..., description="该问题的正确率 (0.0 到 100.0)")
+    main_knowledge_point: str = Field(..., description="LLM提炼的、该问题考察的核心知识点")
+    common_error_analysis: str = Field(..., description="LLM根据题目和统计数据推测的常见错误原因或学生思维误区")
 
 
-# 学情分析报告的最终输出模型
+
 class AssessmentAnalysis(BaseModel):
     assessment_title: str = Field(..., description="被分析的考核的标题")
     overall_summary: str = Field(..., description="对班级整体表现的概括性总结，例如：整体掌握情况良好，但在...方面存在普遍困难。")
     strength_points: List[str] = Field(..., description="学生普遍掌握得比较好的知识点列表")
     weakness_points: List[str] = Field(..., description="学生普遍存在的薄弱知识点列表")
-    problematic_questions: List[QuestionAnalysisDetail] = Field(..., description="对错误率最高或最值得关注的几个问题的详细分析列表")
+    problematic_questions: List[QuestionAnalysis] = Field(..., description="对错误率最高或最值得关注的几个问题的详细分析列表")
     teaching_suggestions: List[str] = Field(..., description="基于以上所有分析，给出的具体、可操作的教学建议列表")
     error_message: Optional[str] = None

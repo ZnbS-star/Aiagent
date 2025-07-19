@@ -1,4 +1,6 @@
 from datetime import datetime
+
+from urllib.parse import quote
 from fastapi import APIRouter,  HTTPException, Body, Query
 from fastapi.responses import StreamingResponse
 import urllib
@@ -14,11 +16,12 @@ from backend_app.models import (
     PracticeChatInput, PracticeChatOutput, 
 )
 from backend_app.services import (
+    analyze_assessment_performance,
     analyze_assessment_performance_service,
-    analyze_assessment_service,
+
     create_user_by_admin_service,
     delete_user_service,
-    export_resources_by_subject_service,
+    export_single_resource_service,
     get_dashboard_usage_service,
     get_low_performing_subjects_service,
     get_student_effectiveness_service,
@@ -67,30 +70,9 @@ async def login_teacher_endpoint(form_data: UserLogin):
 
 @router.post(
     "/student-qa", 
-    response_model=StudentQuestionOutput, 
-    summary="Process a student's question using RAG and LLM",
-    description="Receives a student's question, optionally a student ID. "
-                "It performs a RAG search on the knowledge base, "
-                "then uses an LLM to generate an answer based on the question and retrieved context.",
-    responses={
-        200: {"description": "Successful response with the LLM's answer and context."},
-        400: {"model": Message, "description": "Bad Request (e.g., invalid input)"},
-        500: {"model": Message, "description": "Internal Server Error"}
-    }
 )
 
-async def student_question_answer(input_data: StudentQuestionInput = Body(..., examples={
-    "simple_question": {
-        "summary": "A basic question",
-        "description": "A student asks a question without providing a student ID.",
-        "value": {"question": "What is the main function of a CPU?"}
-    },
-    "question_with_id": {
-        "summary": "Question with student ID",
-        "description": "A student asks a question and provides their ID for potential history tracking.",
-        "value": {"question": "How does photosynthesis work?", "student_id": 101}
-    }
-})):
+async def student_question_answer(input_data: StudentQuestionInput ):
     if not input_data.question or not input_data.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
@@ -107,17 +89,9 @@ async def student_question_answer(input_data: StudentQuestionInput = Body(..., e
 
 
 @router.post(
-    "/student-qa/refine",
-    response_model=StudentQuestionOutput,
-    summary="Refine a student's question based on conversation history",
-    description="Receives conversation history and a new query to refine and regenerate an answer.",
-    responses={
-        200: {"description": "Successful response with the refined LLM's answer."},
-        400: {"model": Message, "description": "Bad Request (e.g., empty history or new_query)"},
-        500: {"model": Message, "description": "Internal Server Error"}
-    }
+    "/student-qa/refine"
 )
-async def refine_student_question(input_data: RefineStudentQAInput = Body(...)):
+async def refine_student_question(input_data: RefineStudentQAInput ):
     if not input_data.history:
         raise HTTPException(status_code=400, detail="History cannot be empty.")
     if not input_data.new_query or not input_data.new_query.strip():
@@ -236,56 +210,49 @@ async def create_initial_teaching_plan(input_data: TeachingPlanNLInput):
 
 
 @router.post(
-    "/teaching-plans/refine",
-    response_model=TeachingPlanOutput,
-    summary="Refine a teaching plan based on conversation history",
-    description="Receives conversation history and a new query to refine an existing teaching plan.",
-    responses={
-        200: {"description": "Teaching plan refined successfully."},
-        400: {"model": Message, "description": "Bad Request (e.g., empty history or new_query)"},
-        500: {"model": Message, "description": "Internal Server Error"}
-    }
+    "/teaching-plans/refine"
 )
-async def refine_teaching_plan(input_data: RefineTeachingPlanInput = Body(...)):
+async def refine_teaching_plan(input_data: RefineTeachingPlanInput ):
     db_conn = None
     try:
-        full_generated_content, _ = await refine_teaching_plan_service(input_data)
+        # 接收服务层返回的新标题和内容
+        new_title, full_generated_content, _ = await refine_teaching_plan_service(input_data)
 
-        if not full_generated_content:
-            raise HTTPException(status_code=500, detail="Failed to generate refined teaching plan content.")
-        new_title = f"Refined Plan (based on ID {input_data.base_teaching_plan_id}) - {datetime.now().strftime('%H%M%S')}"
+        if not full_generated_content or not new_title:
+            raise HTTPException(status_code=500, detail="Failed to generate refined teaching plan content or title.")
+
+        # 使用服务层生成的新标题进行保存
+        title_to_save = new_title
 
         MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
         if not db_conn:
-
             return TeachingPlanOutput(
-                title=new_title,
+                title=title_to_save,
                 generated_plan_content=full_generated_content,
                 teacher_id=input_data.teacher_id,
                 error_message="Content generated but failed to connect to DB for saving."
             )
 
-
         new_plan_id = save_teaching_plan(
             db_conn,
-            new_title,
+            title_to_save,
             full_generated_content,
             input_data.teacher_id
+            # 注意：这里可能还需要传递 subject，如果您的 refine_teaching_plan_service 也返回了它
         )
-
 
         if new_plan_id:
             log_activity(
-                    db_conn,
-                    user_id=input_data.teacher_id,
-                    user_role="teacher",
-                    activity_type="REFINE_TEACHING_PLAN", 
-                    details={"plan_id": new_plan_id, "title": new_title}
+                db_conn,
+                user_id=input_data.teacher_id,
+                user_role="teacher",
+                activity_type="REFINE_TEACHING_PLAN",
+                details={"plan_id": new_plan_id, "title": title_to_save}
             )
             return TeachingPlanOutput(
-                teaching_plan_id=new_plan_id, 
-                title=new_title,
+                teaching_plan_id=new_plan_id,
+                title=title_to_save,
                 generated_plan_content=full_generated_content,
                 teacher_id=input_data.teacher_id
             )
@@ -408,66 +375,57 @@ async def create_assessment_endpoint(input_data: AssessmentNLInput):
 
 @router.post(
     "/assessments/refine",
-    response_model=AssessmentOutput,
-    summary="Refine an assessment based on conversation history",
-    description="Receives conversation history and a new query to refine an existing assessment.",
-    responses={
-        200: {"description": "Assessment refined successfully."},
-        400: {"model": Message, "description": "Bad Request (e.g., empty history or new_query)"},
-        500: {"model": Message, "description": "Internal Server Error"}
-    }
 )
-async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
+async def refine_assessment(input_data: RefineAssessmentInput ):
     if not input_data.history or not input_data.new_query:
         raise HTTPException(status_code=400, detail="History and new_query are required.")
-
     db_conn = None
     try:
-        # 1. 调用服务，并解构返回的元组
-        full_generated_content,_,subject= await refine_assessment_service(input_data)
+        # 接收包含新标题的元组
+        new_title, full_generated_content, _, subject = await refine_assessment_service(input_data)
+
+        if not full_generated_content or not new_title:
+            raise HTTPException(status_code=500, detail="Failed to generate refined assessment content or title.")
+
         answer_separator = "参考答案与解析"
         parts = full_generated_content.split(answer_separator, 1)
         questions_part = parts[0].strip()
         answers_part = parts[1].strip() if len(parts) > 1 else "（无答案信息）"
-        # 2. 检查服务是否成功生成内容
-        if not full_generated_content:
-            raise HTTPException(status_code=500, detail="Failed to generate refined assessment content.")
 
-        # 3. 保存新副本到数据库
-        new_title = f"Refined Assessment (based on ID {input_data.base_assessment_id}) - {datetime.now().strftime('%H%M%S')}"
-        
+        # 使用服务层生成的新标题
+        title_to_save = new_title
+
         MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
         if not db_conn:
             # 返回内容，但提示保存失败
             return AssessmentOutput(
-                title=new_title,
-                generated_assessment_content=full_generated_content,
+                title=title_to_save,
+                generated_assessment_content=questions_part, # 返回问题部分
                 teacher_id=input_data.teacher_id,
                 error_message="Content generated but failed to connect to DB for saving."
             )
 
         new_assessment_id = save_assessment(
             db_conn,
-            new_title,
-            questions_part,      
-            answers_part,        
+            title_to_save,
+            questions_part,
+            answers_part,
             input_data.teacher_id,
-            subject=subject 
-            
+            subject=subject
         )
 
         if new_assessment_id:
             log_activity(
-                    db_conn,
-                    user_id=input_data.teacher_id,
-                    user_role="teacher",
-                    activity_type="REFINE_ASSESSMENT",
-                    details={"assessment_id": new_assessment_id, "title": new_title}
-                )
+                db_conn,
+                user_id=input_data.teacher_id,
+                user_role="teacher",
+                activity_type="REFINE_ASSESSMENT",
+                details={"assessment_id": new_assessment_id, "title": title_to_save}
+            )
             return AssessmentOutput(
                 assessment_id=new_assessment_id,
-                title=new_title,
+                title=title_to_save,
                 generated_assessment_content=questions_part,
                 teacher_id=input_data.teacher_id
             )
@@ -486,19 +444,6 @@ async def refine_assessment(input_data: RefineAssessmentInput = Body(...)):
 
 @router.post(
     "/assessments/evaluate-answers",
-    response_model=Message, 
-    summary="Evaluate Student's Assessment Answers from Natural Language Query",
-    description="Accepts a natural language query detailing a student's answers to an assessment. "
-                "Uses an LLM to extract the answers, then evaluates them using the service layer, "
-                "and saves the evaluation. Key details like `assessment_id`, `student_id` (optional), "
-                "and `student_name` (optional, but one of student_id or student_name must be resolvable) "
-                "are provided directly in the input alongside the query.",
-    responses={
-        200: {"model": Message, "description": "Student answers processed and saved successfully."}, # Changed description and model if it was different
-        400: {"model": Message, "description": "Bad Request (e.g., invalid query, missing essential info after NLP, NLP processing error, or missing required direct fields like assessment_id)"},
-        422: {"model": Message, "description": "Validation Error (e.g., assessment_id is not an int)"},
-        500: {"model": Message, "description": "Internal Server Error / LLM or DB failure"}
-    }
 )
 async def evaluate_student_answers(input_data: StudentAssessmentNLInput ):
     if not input_data.query or not input_data.query.strip():
@@ -630,35 +575,59 @@ async def evaluate_student_answers(input_data: StudentAssessmentNLInput ):
 
 
 @router.post(
-    "/practice-questions/generate",
-    response_model=PracticeQuestionsOutput,
-    summary="Generate Practice Questions from Natural Language Query",
-    description="Accepts a natural language query to generate practice questions. Uses an LLM to extract "
-                "the practice topic and any question preferences. Student ID and name can also be provided "
-                "for personalized question generation.",
-    responses={
-        200: {"description": "Practice questions generated successfully."},
-        400: {"model": Message, "description": "Bad Request (e.g., invalid query, missing essential info after NLP, NLP processing error)"},
-        500: {"model": Message, "description": "Internal Server Error / LLM or RAG failure during question generation"}
-    }
+    "/practice-questions/generate"
 )
 async def generate_practice_questions_endpoint(input_data: PracticeQuestionNLInput = Body):
     if not input_data.query or not input_data.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     FULL_PROMPT_FOR_PRACTICE_NLP = f"""
-    请分析以下用户的请求，该请求旨在生成一些练习题。你的任务是从中提取特定信息。
+    你是一个执行严格指令的文本分析器。请分析以下用户的练习题生成请求。
 
     --- 用户请求开始 ---
     {input_data.query}
     --- 用户请求结束 ---
 
-    你需要根据上述请求，提取以下实体：
-    1.  "practice_topic" (字符串, 必填): 用户想要练习的具体主题或知识点。例如："Python列表推导式"、"光合作用的基本原理"。
-    2.  "question_preferences" (对象, 可选): 一个指定所需问题类型和数量的字典。例如：{{"选择题": 2, "填空题": 3}}。如果用户没有明确指定，则随便返回一个数值。
+    你的任务是提取以下两个实体，并以JSON格式输出：
 
-    你的最终响应必须是且只能是一个符合以下描述的 JSON 对象。不要包含任何解释性文字或前导/后置文本，直接输出 JSON。
-"""
+    1.  **"practice_topic" (字符串, 必填)**: 
+        用户想要练习的【首要、核心】主题。即使请求中包含子主题（如“关于万历皇帝”），你也应该提取更宏观的主题（如“明朝历史”或“万历十五年”）。
+        
+    2.  **"question_preferences" (JSON对象, 可选)**: 
+        一个【键值对】对象，用于指定题型和数量。
+        - **【规则1 - 结构必须简单】**: Key 必须是题型 (字符串)，Value 必须是该题型的数量 (【整数】)。绝对不能是嵌套的JSON对象。
+        - **【规则2 - 忽略子主题】**: 在提取数量时，【忽略】掉所有关于具体人物、章节等子主题的限定。你只关心题型和总数。
+        - **【规则3 - 合理默认】**: 如果用户没有明确指定题型和数量，可以返回一个合理的默认值，例如 `{{"选择题": 3, "判断题": 2}}`。
+
+    ---
+    **【重要示例】**
+
+    *   **输入**: "我正在看黄仁宇的《万历十五年》，想做几道题。请出2道关于“万历皇帝”的选择题和2道关于“申时行”的简答题。"
+    *   **你的正确输出**:
+        ```json
+        {{
+          "practice_topic": "《万历十五年》相关历史",
+          "question_preferences": {{
+            "选择题": 2,
+            "简答题": 2
+          }}
+        }}
+        ```
+
+    *   **输入**: "请给我出5道关于TensorFlow.js的选择题"
+    *   **你的正确输出**:
+        ```json
+        {{
+          "practice_topic": "TensorFlow.js",
+          "question_preferences": {{
+            "选择题": 5
+          }}
+        }}
+        ```
+    ---
+
+    现在，请严格按照以上规则和示例，分析用户请求并生成JSON输出。你的响应必须是且只能是一个JSON对象。
+    """
     parsed_entities_dict = await parse_query_with_llm(FULL_PROMPT_FOR_PRACTICE_NLP)
 
     if "error" in parsed_entities_dict:
@@ -716,17 +685,6 @@ async def generate_practice_questions_endpoint(input_data: PracticeQuestionNLInp
 
 @router.post(
     "/practice-assistant/chat",
-    response_model=PracticeChatOutput,
-    summary="[Student] Interact with the Practice Assistant",
-    description="Handles the ongoing conversation for practice questions. "
-                "Send the entire chat history and the user's new message. "
-                "The API will detect the user's intent (refine questions, submit answer, etc.) "
-                "and respond accordingly.",
-    responses={
-        200: {"description": "Successful interaction."},
-        400: {"model": Message, "description": "Bad Request (e.g., empty history or query)"},
-        500: {"model": Message, "description": "Internal Server Error"}
-    }
 )
 async def practice_assistant_chat(input_data: PracticeChatInput):
     if not input_data.history or not input_data.new_query:
@@ -739,38 +697,8 @@ async def practice_assistant_chat(input_data: PracticeChatInput):
         print(f"API ERROR in /practice-assistant/chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
-
-@router.get(
-    "/assessments/{assessment_id}/student-performance/",
-    response_model=List[StudentAssessmentSummary],
-    summary="Get Aggregated Student Performance for a Specific Assessment",
-    description="Retrieves an aggregated list of performance summaries for all students who took a specific assessment. "
-                "Each summary includes counts of correct/incorrect answers and a calculated accuracy rate.",
-    responses={
-        200: {"description": "Successfully retrieved student performance summary."},
-        404: {"model": Message, "description": "Assessment not found."},
-        500: {"model": Message, "description": "Internal Server Error."}
-    }
-)
-async def get_assessment_performance_for_teacher(assessment_id: int):
-    try:
-        performance_summary = await get_student_assessment_performance_service(assessment_id=assessment_id)
-        return performance_summary
-    except HTTPException as he:
-        raise he 
-    except Exception as e:
-        print(f"API ERROR: An unexpected error occurred in /assessments/{assessment_id}/student-performance/ endpoint: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
-    
 @router.get(
     "/assessments/list",
-    response_model=PracticeQuestionListOutput,
-    summary="Get List of Available Practice Questions",
-    description="Retrieves a list of all available practice question sets, including their ID and a generated title, for a student to choose from.",
-    responses={
-        200: {"description": "Successfully retrieved the list of practice questions."},
-        500: {"model": Message, "description": "Internal Server Error."}
-    }
 )
 async def get_practice_list_endpoint():
     try:
@@ -783,15 +711,8 @@ async def get_practice_list_endpoint():
 
 
 @router.get(
-    "/assessments/{assessment_id}/details",  # <-- 建议使用更具描述性的路由
-    response_model=PracticeQuestionDetailOutput,
-    summary="Get Details of a Specific Assessment",
-    description="Retrieves the full content of a specific assessment by its ID.",
-    responses={
-        200: {"description": "Successfully retrieved assessment details."},
-        404: {"model": Message, "description": "Assessment not found."},
-        500: {"model": Message, "description": "Internal Server Error."}
-    }
+    "/assessments/{assessment_id}/details", 
+
 )
 async def get_assessment_detail_endpoint(assessment_id: int): # <-- 参数名也更清晰
     try:
@@ -825,8 +746,7 @@ async def publish_assessment_endpoint(inputdata:PublishAssessment =Body):
 
 @router.get(
     "/admin/users", 
-    response_model=PaginatedUsersResponse, 
-    summary="[Admin] Get a paginated list of users"
+
 )
 async def admin_get_users(
     role: Literal['student', 'teacher'],
@@ -835,12 +755,11 @@ async def admin_get_users(
     search: Optional[str] = None
 ):
 
-    return await list_users_service(role, page, page_size, search)
+    return await list_users_service(role, page, 10, search)
 
 @router.post(
     "/admin/users",
-    status_code=201,
-    summary="[Admin] Create a new user"
+
 )
 async def admin_create_user_endpoint(user_data: AdminCreateUserInput):
 
@@ -848,20 +767,18 @@ async def admin_create_user_endpoint(user_data: AdminCreateUserInput):
 
 @router.put(
     "/admin/users/{role}/{user_id}/reset-password",
-    summary="[Admin] Reset a user's password"
 )
 async def admin_reset_password_endpoint(
     role: Literal['student', 'teacher'], 
     user_id: int, 
-    password_data: AdminResetPasswordInput
+    password: str
 ):
 
-    return await reset_user_password_service(user_id, role, password_data)
+    return await reset_user_password_service(user_id, role, password)
 
 @router.delete(
     "/admin/users/{role}/{user_id}",
-    status_code=204,
-    summary="[Admin] Delete a user"
+
 )
 async def admin_delete_user_endpoint(
     role: Literal['student', 'teacher'], 
@@ -873,16 +790,14 @@ async def admin_delete_user_endpoint(
 
 @router.get(
     "/admin/subjects", 
-    response_model=List[str],
-    summary="[Admin] Get a list of all subjects"
+
 )
 async def admin_get_all_subjects():
     return await list_all_subjects_service()
 
 @router.get(
     "/admin/resources/by-subject/{subject}", 
-    response_model=PaginatedAdminResourcesResponse,
-    summary="[Admin] Get a paginated list of resources for a specific subject"
+
 )
 async def admin_get_resources_by_subject(
     subject: str,
@@ -895,42 +810,35 @@ async def admin_get_resources_by_subject(
 
 @router.get(
     "/admin/resources/{resource_type}/{resource_id}",
-    response_model=AdminResourceDetailView,
-    summary="[Admin] Get details of a specific teacher resource"
+
 )
 async def admin_get_teacher_resource_detail(resource_type: AdminResourceType, resource_id: int):
     return await get_teacher_resource_detail_service(resource_type, resource_id)
 
 @router.get(
-    "/admin/resources/by-subject/{subject}/export",
-    summary="[Admin] Export resources for a subject to CSV"
+    "/admin/resources/{resource_type}/{resource_id}/export",
+    summary="[Admin] Export a SINGLE resource to a text file"
 )
-async def admin_export_resources_by_subject_endpoint(
-    subject: str, 
-    search: Optional[str] = None
+async def admin_export_single_resource_endpoint(
+    resource_type: AdminResourceType, 
+    resource_id: int
 ):
-    csv_data = await export_resources_by_subject_service(subject, search)
-    response = StreamingResponse(iter([csv_data]), media_type="text/csv")
-    original_filename = f"resources_{subject}_{datetime.now().strftime('%Y%m%d')}.csv"
-    
-
-    encoded_filename = urllib.parse.quote(original_filename)
-    
+    export_data = await export_single_resource_service(resource_type, resource_id)
+    file_content = export_data["content"]
+    filename = export_data["filename"]
+    response = StreamingResponse(iter([file_content]), media_type="text/plain; charset=utf-8")
+    encoded_filename = quote(filename)
     response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_filename}"
     return response
 
 @router.get(
     "/admin/dashboard/usage-stats",
-    response_model=DashboardUsageResponse,
-    summary="[Admin Dashboard] Get daily and weekly usage statistics"
 )
 async def admin_get_usage_stats():
     return await get_dashboard_usage_service()
 
 @router.get(
     "/admin/dashboard/teaching-efficiency",
-    response_model=List[TeacherEfficiencyStat],
-    summary="[Admin Dashboard] Get teaching efficiency statistics"
 )
 async def admin_get_teaching_efficiency():
 
@@ -938,8 +846,6 @@ async def admin_get_teaching_efficiency():
 
 @router.get(
     "/admin/dashboard/low-performing-subjects",
-    response_model=List[SubjectPerformance],
-    summary="[Admin Dashboard] Get subjects with the lowest average scores"
 )
 async def admin_get_low_performing_subjects():
 
@@ -947,8 +853,6 @@ async def admin_get_low_performing_subjects():
 
 @router.get(
     "/admin/dashboard/student-effectiveness",
-    response_model=StudentEffectivenessResponse,
-    summary="[Admin Dashboard] Get student learning effectiveness metrics"
 )
 async def admin_get_student_effectiveness():
 
@@ -956,9 +860,6 @@ async def admin_get_student_effectiveness():
 
 @router.get(
     "/teacher/{teacher_id}/published-assessments",
-    response_model=List[PublishedAssessmentInfo],
-    summary="[Teacher] Get all published assessments for learning analysis",
-    tags=["Teacher Toolkit Features"]
 )
 async def get_teacher_published_assessments_endpoint(teacher_id: int):
 
@@ -966,10 +867,7 @@ async def get_teacher_published_assessments_endpoint(teacher_id: int):
 
 @router.get(
     "/assessments/{assessment_id}/analysis",
-    response_model=AssessmentAnalysisOutput,
-    summary="[Teacher] Get a detailed learning analysis for an assessment",
-    tags=["Teacher Toolkit Features"]
 )
 async def get_assessment_analysis_endpoint(assessment_id: int):
 
-    return await analyze_assessment_performance_service(assessment_id)
+    return await analyze_assessment_performance(assessment_id)

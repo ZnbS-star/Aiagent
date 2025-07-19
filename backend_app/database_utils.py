@@ -576,7 +576,6 @@ async def get_student_for_auth(student_name: str) -> Optional[Dict[str, Any]]:
         if db_conn and db_conn.is_connected():
             if 'cursor' in locals() and cursor: # ensure cursor exists
                 cursor.close()
-            db_conn.close()
 
 
 async def save_student_registration(student_name: str, hashed_password: str) -> Optional[Dict[str, Any]]:
@@ -608,7 +607,6 @@ async def save_student_registration(student_name: str, hashed_password: str) -> 
         if db_conn and db_conn.is_connected():
             if 'cursor' in locals() and cursor: # ensure cursor exists
                 cursor.close()
-            db_conn.close()
 
 async def get_teacher_for_auth(teacher_name: str) -> Optional[Dict[str, Any]]:
     db_conn = None
@@ -634,7 +632,6 @@ async def get_teacher_for_auth(teacher_name: str) -> Optional[Dict[str, Any]]:
         if db_conn and db_conn.is_connected():
             if 'cursor' in locals() and cursor: # ensure cursor exists
                 cursor.close()
-            db_conn.close()
 
 async def save_teacher_registration(teacher_name: str, hashed_password: str) -> Optional[Dict[str, Any]]:
     db_conn = None
@@ -665,7 +662,7 @@ async def save_teacher_registration(teacher_name: str, hashed_password: str) -> 
         if db_conn and db_conn.is_connected():
             if 'cursor' in locals() and cursor: 
                 cursor.close()
-            db_conn.close()
+
 
 def get_teaching_plan_by_id(db_conn, plan_id: int) -> Optional[dict]:
     """Retrieves a single teaching plan by its ID."""
@@ -1075,7 +1072,7 @@ def get_unified_resources_by_subject(db_conn, subject: str, page: int = 1, page_
             tp.created_at,
             tp.subject,
             t.teacher_name AS creator,
-            'teaching_plan' AS resource_type
+            'teaching_plans' AS resource_type
         FROM teaching_plans AS tp
         LEFT JOIN teachers t ON tp.teacher_id = t.teacher_id
     """
@@ -1088,7 +1085,7 @@ def get_unified_resources_by_subject(db_conn, subject: str, page: int = 1, page_
             a.created_at,
             a.subject,
             t.teacher_name AS creator,
-            'assessment' AS resource_type
+            'assessments' AS resource_type
         FROM assessments AS a
         LEFT JOIN teachers t ON a.teacher_id = t.teacher_id
     """
@@ -1164,6 +1161,9 @@ def get_activity_stats(db_conn, period: str) -> List[Dict]:
         cursor.close()
 
 def get_teacher_content_creation_stats(db_conn) -> List[Dict]:
+    """
+    从 activity_log 表中统计每位教师创建和修改教案/考核的次数。
+    """
     activity_types = (
         'GENERATE_TEACHING_PLAN', 
         'REFINE_TEACHING_PLAN',
@@ -1171,7 +1171,12 @@ def get_teacher_content_creation_stats(db_conn) -> List[Dict]:
         'REFINE_ASSESSMENT'
     )
     
-    sql = """
+    # --- 【核心修正点】 ---
+    # 1. 动态生成占位符字符串，例如 " (%s, %s, %s, %s) "
+    placeholders = ', '.join(['%s'] * len(activity_types))
+    
+    # 2. 将动态生成的占位符嵌入到 SQL 查询中
+    sql = f"""
         SELECT
             t.teacher_id,
             t.teacher_name,
@@ -1179,14 +1184,15 @@ def get_teacher_content_creation_stats(db_conn) -> List[Dict]:
             COUNT(al.log_id) as count
         FROM activity_log al
         JOIN teachers t ON al.user_id = t.teacher_id
-        WHERE al.user_role = 'teacher' AND al.activity_type IN %s
+        WHERE al.user_role = 'teacher' AND al.activity_type IN ({placeholders})
         GROUP BY t.teacher_id, t.teacher_name, al.activity_type
         ORDER BY t.teacher_id;
     """
     
     cursor = db_conn.cursor(dictionary=True)
     try:
-        cursor.execute(sql, (activity_types,))
+        # 3. 将 activity_types 元组直接作为参数传递，驱动会自动解包
+        cursor.execute(sql, activity_types)
         return cursor.fetchall()
     except mysql.connector.Error as err:
         print(f"Error getting teacher content creation stats: {err}")
@@ -1194,7 +1200,7 @@ def get_teacher_content_creation_stats(db_conn) -> List[Dict]:
     finally:
         cursor.close()
 
-def get_low_performing_subjects(db_conn, limit: int = 5) -> List[Dict]:
+def get_low_performing_subjects(db_conn, limit: int = 0) -> List[Dict]:
     sql = """
         SELECT
             a.subject,
@@ -1209,7 +1215,7 @@ def get_low_performing_subjects(db_conn, limit: int = 5) -> List[Dict]:
         JOIN student_assessment_answers saa ON a.id = saa.assessment_id
         WHERE a.subject IS NOT NULL AND a.subject != ''
         GROUP BY a.subject
-        HAVING total_answers > 5 -- 只统计有一定作答量的学科
+        HAVING total_answers > 0 -- 只统计有一定作答量的学科
         ORDER BY average_score ASC
         LIMIT %s;
     """
@@ -1224,37 +1230,82 @@ def get_low_performing_subjects(db_conn, limit: int = 5) -> List[Dict]:
         cursor.close()
 
 def get_daily_accuracy_trend(db_conn) -> List[Dict]:
-
-    sql = """
-        SELECT 
-            DATE(attempt_timestamp) as date,
-            AVG(CAST(REPLACE(correctness_assessment, '%', '') AS DECIMAL(5,2))) as average_accuracy
-        FROM practice_attempts
-        WHERE 
-            correctness_assessment IS NOT NULL 
-            AND correctness_assessment LIKE '%_%%' -- 确保是百分比格式
-        GROUP BY DATE(attempt_timestamp)
-        ORDER BY date ASC
-        LIMIT 30; -- 最近30天
     """
-    cursor = db_conn.cursor(dictionary=True)
+    【注意】这个函数现在是独立的，它自己管理数据库连接。
+    这是为了解决一个顽固的连接过早关闭的问题。
+    """
+    
+    # 1. 在函数内部创建连接
+    conn = None
+    cursor = None
+    MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+
     try:
+        conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if not conn:
+            print("Error: get_daily_accuracy_trend could not establish its own DB connection.")
+            return []
+
+        sql = """
+            SELECT 
+                DATE(attempt_timestamp) as date,
+                AVG(
+                    CASE
+                        WHEN correctness_assessment LIKE '%_%%' THEN CAST(REPLACE(correctness_assessment, '%%', '') AS DECIMAL(10,2))
+                        WHEN correctness_assessment = 'Correct' THEN 100.0
+                        WHEN correctness_assessment = 'Partially Correct' THEN 50.0
+                        WHEN correctness_assessment = 'Incorrect' THEN 0.0
+                        ELSE NULL 
+                    END
+                ) as average_accuracy
+            FROM practice_attempts
+            WHERE correctness_assessment IS NOT NULL
+            GROUP BY DATE(attempt_timestamp)
+            HAVING AVG(CASE ... END) IS NOT NULL 
+            ORDER BY date 
+            LIMIT 30;
+        """
+        sql = sql.replace("CASE ... END", """
+                    CASE
+                        WHEN correctness_assessment LIKE '%_%%' THEN CAST(REPLACE(correctness_assessment, '%%', '') AS DECIMAL(10,2))
+                        WHEN correctness_assessment = 'Correct' THEN 100.0
+                        WHEN correctness_assessment = 'Partially Correct' THEN 50.0
+                        WHEN correctness_assessment = 'Incorrect' THEN 0.0
+                        ELSE NULL 
+                    END
+        """)
+
+        cursor = conn.cursor(dictionary=True)
         cursor.execute(sql)
-        return cursor.fetchall()
+        results = cursor.fetchall()
+        
+        for row in results:
+            if row['average_accuracy'] is not None:
+                row['average_accuracy'] = float(row['average_accuracy'])
+        
+        return results
+
     except mysql.connector.Error as err:
-        print(f"Error getting daily accuracy trend: {err}")
+        print(f"Error in self-contained get_daily_accuracy_trend: {err}")
         return []
     finally:
-        cursor.close()
+        # 2. 在函数结束时，关闭自己创建的所有资源
+        if cursor:
+            cursor.close()
+        if conn and conn.is_connected():
+            conn.close()
 
 def get_all_practice_attempts_with_concepts(db_conn) -> List[Dict]:
+    """
+    获取所有包含知识点标签的练习作答记录。
+    """
     sql = """
         SELECT 
             pqc.concepts_covered,
             pa.correctness_assessment
         FROM practice_attempts pa
         JOIN practice_questions_catalog pqc ON pa.catalog_id = pqc.catalog_id
-        WHERE pqc.concepts_covered IS NOT NULL AND pqc.concepts_covered != '[]'
+        WHERE pqc.concepts_covered IS NOT NULL AND pqc.concepts_covered != '[]' AND pa.correctness_assessment IS NOT NULL
     """
     cursor = db_conn.cursor(dictionary=True)
     try:
@@ -1264,7 +1315,8 @@ def get_all_practice_attempts_with_concepts(db_conn) -> List[Dict]:
         print(f"Error getting all practice attempts with concepts: {err}")
         return []
     finally:
-        cursor.close()
+        if 'cursor' in locals() and cursor:
+            cursor.close()
 
 def get_published_assessments_by_teacher(db_conn, teacher_id: int) -> List[Dict[str, Any]]:
     if not db_conn: return []

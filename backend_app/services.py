@@ -113,9 +113,7 @@ async def _identify_user_intent(chat_history: List[ChatMessage], new_query: str)
     """
     
     try:
-        # 使用一个快速、低成本的模型
         llm = ChatZhipuAI(model="glm-4", temperature=0.0)
-        # 这里可以加一个OutputParser来确保输出格式正确，但简单起见，我们先直接解析字符串
         response = await llm.ainvoke(intent_prompt)
         intent = response.content.strip()
         
@@ -131,22 +129,36 @@ async def _identify_user_intent(chat_history: List[ChatMessage], new_query: str)
         print(f"SERVICE ERROR : Failed to identify intent: {e}")
         return "UNKNOWN"
 
-async def _identify_practice_intent(history: List[ChatMessage], new_query: str) -> PracticeIntent:
+async def _identify_practice_intent(history: List[ChatMessage], new_query: str, active_question_text: Optional[str] = None) -> PracticeIntent:
     """使用LLM分析对话，判断用户更精确的意图。"""
     print("SERVICE: Identifying nuanced practice assistant intent...")
     history_str = "\n".join([f"{msg.role}: {msg.content}" for msg in history])
 
+    active_question_context = ""
+    if active_question_text and active_question_text.strip():
+        active_question_context = f"""
+    **当前激活的题目 (如果学生正在作答):**
+    ---
+    {active_question_text}
+    ---
+    """
+    else:
+        active_question_context = "**当前没有激活的题目。**"
+
+
+
     intent_prompt = f"""
     你是一个文本分类器，任务是分析学生与AI练习助手的对话，判断学生最新输入的意图。
     意图只能是以下五种之一: ADD_QUESTIONS, REWRITE_QUESTIONS, SUBMIT_ANSWER, GENERATE_NEW, UNKNOWN。
+
+    {active_question_context}
 
     **意图定义:**
     - ADD_QUESTIONS: 用户明确要求在上一轮题目基础上【增加】新的题目。
       (关键词: "再来几道", "加上", "多出点", "还想要2道")
     - REWRITE_QUESTIONS: 用户对上一轮的题目不满意，要求【替换】或【重写】。这包括改变难度、换内容、或完全换题型。
       (关键词: "太难了", "简单点", "换一批", "不要这个", "换成选择题")
-    - SUBMIT_ANSWER: 用户正在提供问题的答案。
-      (明显特征: "答案是", "第一题选A", "我的代码如下", 或者直接是一段看起来像答案的文本)
+    - SUBMIT_ANSWER: 用户正在提供问题的答案。**这是一个高优先级的判断**。如果【当前激活的题目】存在，并且用户的输入可以被合理解释为该题目的答案（**即使是很短的词或数字**），则意图应为 SUBMIT_ANSWER。例如，题目是填空题，用户的输入只是一个词。
     - GENERATE_NEW: 用户想开始一个【全新的练习主题】，与上一轮无关。
       (关键词: "我们来练习...", "换个主题", "我想学...", "出点关于...的题")
     - UNKNOWN: 无法判断或闲聊。
@@ -157,6 +169,12 @@ async def _identify_practice_intent(history: List[ChatMessage], new_query: str) 
     ---
     **学生最新输入:** "{new_query}"
     ---
+
+    **示例 (填空题作答):**
+    - 当前激活的题目: "法国的首都是____。"
+    - 学生最新输入: "巴黎"
+    - 你的输出: SUBMIT_ANSWER
+
     你的输出【必须只包含一个单词】，即你选择的意图类型。
     """
     try:
@@ -166,7 +184,7 @@ async def _identify_practice_intent(history: List[ChatMessage], new_query: str) 
         
         valid_intents: List[PracticeIntent] = ["ADD_QUESTIONS", "REWRITE_QUESTIONS", "SUBMIT_ANSWER", "GENERATE_NEW", "UNKNOWN"]
         if intent in valid_intents:
-            print(f"SERVICE: Identified intent as: {intent}")
+            print(f"SERVICE: Identified intent as: {intent} (with active question context)")
             return intent
         print(f"SERVICE WARNING: LLM returned invalid intent '{intent}'. Defaulting to UNKNOWN.")
         return "UNKNOWN"
@@ -175,292 +193,293 @@ async def _identify_practice_intent(history: List[ChatMessage], new_query: str) 
         return "UNKNOWN"
 
 async def process_practice_chat_service(input_data: PracticeChatInput) -> PracticeChatOutput:
-    intent = await _identify_practice_intent(input_data.history, input_data.new_query)
     db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
-    # --- Branch 1: User is submitting an answer ---
-    if intent == "SUBMIT_ANSWER":
-        if not input_data.active_catalog_id:
-            return PracticeChatOutput(assistant_response_text="我好像不知道你在回答哪一套题，请先让我出题。", intent_detected=intent)
-        try:
-            feedback_input = PracticeFeedbackInput(student_id=input_data.student_id, catalog_id=input_data.active_catalog_id, student_answer=input_data.new_query)
-            feedback_result = await get_practice_feedback_service(feedback_input)
+    active_question_text = None
+    practice_set_details = None
+
+    try:
+        if input_data.active_catalog_id and db_conn:
+            print(f"SERVICE: Active catalog ID {input_data.active_catalog_id} found. Fetching question text for context.")
+            practice_set_details = get_practice_question_details_by_id(db_conn, input_data.active_catalog_id)
+            if practice_set_details:
+                active_question_text = practice_set_details.get("question_text")
+
+        # 将获取到的题目文本传递给意图识别函数
+        intent = await _identify_practice_intent(input_data.history, input_data.new_query, active_question_text)
+
+        # --- Branch 1: User is submitting an answer ---
+        if intent == "SUBMIT_ANSWER":
+            if not input_data.active_catalog_id:
+                return PracticeChatOutput(assistant_response_text="我好像不知道你在回答哪一套题，请先让我出题。", intent_detected=intent)
+            
+            if not practice_set_details:
+                 return PracticeChatOutput(assistant_response_text=f"抱歉，我找不到ID为 {input_data.active_catalog_id} 的题目了，我们重新开始吧？", intent_detected=intent, error_message="Active practice set not found in DB.")
+
+            try:
+                feedback_input = PracticeFeedbackInput(student_id=input_data.student_id, catalog_id=input_data.active_catalog_id, student_answer=input_data.new_query)
+                feedback_result = await get_practice_feedback_service(feedback_input)
+                log_activity(
+                        db_conn,
+                        user_id=input_data.student_id,
+                        user_role="student",
+                        activity_type="PRACTICE_SUBMIT_ANSWER",
+                        details={"catalog_id": input_data.active_catalog_id, "attempt_id": feedback_result.attempt_id}
+                    )
+                return PracticeChatOutput(assistant_response_text="这是你本次作答的反馈：", intent_detected=intent, feedback=feedback_result)
+            except Exception as e:
+                print(f"Error during feedback service call: {e}")
+                return PracticeChatOutput(assistant_response_text="抱歉，在评价你的答案时出错了。", intent_detected=intent, error_message=str(e))
+
+        # --- Branch 2: User wants to generate a completely new set of questions ---
+        elif intent == "GENERATE_NEW":
+            nlp_prompt_new = """
+            你是一个分析专家。请从以下文本中提取【核心练习主题】和【明确的题目偏好】。
+            ---
+            "{new_query}"
+            ---
+            你需要提取:
+            1. "practice_topic" (字符串, 必填): 核心练习主题。
+            2. "question_preferences" (对象, 必填): 一个只包含【题型:数量】的JSON对象。键必须是字符串，值必须是整数。如果用户未提及任何题型，则返回一个空的JSON对象{{}}。
+            你的最终响应必须是且只能是一个JSON对象。
+            """
+            FULL_PROMPT = nlp_prompt_new.format(new_query=input_data.new_query)
+            parsed_entities = await parse_query_with_llm(FULL_PROMPT)
+
+            if "error" in parsed_entities or not parsed_entities.get("practice_topic"):
+                return PracticeChatOutput(assistant_response_text="我不太明白你想要练习什么，可以再说清楚一点吗？", intent_detected=intent)
+
+            practice_topic = parsed_entities.get("practice_topic")
+            
+            raw_prefs = parsed_entities.get("question_preferences")
+            cleaned_prefs = {}
+            if isinstance(raw_prefs, dict):
+                for key, value in raw_prefs.items():
+                    if isinstance(key, str) and isinstance(value, int):
+                        cleaned_prefs[key] = value
+            
+            final_prefs = cleaned_prefs or {"选择题": 2, "简答题": 1}
+
+            service_input = PracticeQuestionsInput(student_id=input_data.student_id, practice_topic=practice_topic, question_preferences=final_prefs)
+            new_questions_result = await generate_practice_questions_service(service_input)
             log_activity(
-                    db_conn,
-                    user_id=input_data.student_id,
-                    user_role="student",
-                    activity_type="PRACTICE_SUBMIT_ANSWER",
-                    details={"catalog_id": input_data.active_catalog_id, "attempt_id": feedback_result.attempt_id}
-                )
-            return PracticeChatOutput(assistant_response_text="这是你本次作答的反馈：", intent_detected=intent, feedback=feedback_result)
-        except Exception as e:
-            print(f"Error during feedback service call: {e}")
-            return PracticeChatOutput(assistant_response_text="抱歉，在评价你的答案时出错了。", intent_detected=intent, error_message=str(e))
+                        db_conn,
+                        user_id=input_data.student_id,
+                        user_role="student",
+                        activity_type="GENERATE_NEW_PRACTICE",
+                        details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
+                    )
+            if new_questions_result.error_message:
+                return PracticeChatOutput(assistant_response_text=f"抱歉，生成题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
+            
+            return PracticeChatOutput(
+                assistant_response_text="好的，这是为你准备的新题目：",
+                intent_detected=intent,
+                new_questions=new_questions_result
+            )
 
-    # --- Branch 2: User wants to generate a completely new set of questions ---
-    elif intent == "GENERATE_NEW":
-        nlp_prompt_new = """
-        你是一个分析专家。请从以下文本中提取【核心练习主题】和【明确的题目偏好】。
-        ---
-        "{new_query}"
-        ---
-        你需要提取:
-        1. "practice_topic" (字符串, 必填): 核心练习主题。
-        2. "question_preferences" (对象, 必填): 一个只包含【题型:数量】的JSON对象。键必须是字符串，值必须是整数。如果用户未提及任何题型，则返回一个空的JSON对象{{}}。
-        你的最终响应必须是且只能是一个JSON对象。
-        """
-        FULL_PROMPT = nlp_prompt_new.format(new_query=input_data.new_query)
-        parsed_entities = await parse_query_with_llm(FULL_PROMPT)
+        # --- Branch 3: User wants to add more questions (Merge Logic) ---
+        elif intent == "ADD_QUESTIONS":
+            if not input_data.active_catalog_id:
+                return PracticeChatOutput(assistant_response_text="我需要先为你出一套题，才能在它的基础上修改哦。", intent_detected=intent)
 
-        if "error" in parsed_entities or not parsed_entities.get("practice_topic"):
-            return PracticeChatOutput(assistant_response_text="我不太明白你想要练习什么，可以再说清楚一点吗？", intent_detected=intent)
+            # Get old questions and reliable topic from DB
+            original_questions, reliable_topic = "", "相关主题"
+            
+            # Reuse details fetched earlier
+            if practice_set_details:
+                original_answers = practice_set_details.get("model_answer", "")
+                original_questions = practice_set_details.get("question_text", "")
+                concepts_str = practice_set_details.get("concepts_covered", "")
+                try: reliable_topic = json.loads(concepts_str)[0] if concepts_str else "相关主题"
+                except (json.JSONDecodeError, IndexError): pass
+            
+            if not original_questions:
+                return PracticeChatOutput(assistant_response_text="抱歉，我找不到你上一轮的题目了，我们重新开始吧？", intent_detected=intent)
+            
+            # Use NLP to get ONLY the new preferences to add
+            nlp_prompt_add = """
+            你是一个分析专家。你的任务是从以下用户的【新增指令】中，提取出【明确的题目偏好】。
+            ---
+            "{new_query}"
+            ---
+            你需要提取一个名为 "question_preferences" 的JSON对象，它只包含【题型:数量】的键值对。
+            **规则:**
+            1. 键必须是字符串(题型)，值必须是整数(数量)。
+            2. 如果用户提到了题型但数量模糊（例如 "几道选择题"），你【必须】使用默认数量 `3`。
+            3. 如果用户没有提到任何题型，返回一个空对象 `{{}}`。
+            
+            **示例:**
+            - 输入: "再来2道编程题" -> 输出: `{{"question_preferences": {{"编程题": 2}}}}`
+            - 输入: "再出几道选择题吧" -> 输出: `{{"question_preferences": {{"选择题": 3}}}}`
+            """
+            FULL_PROMPT_ADD = nlp_prompt_add.format(new_query=input_data.new_query)
+            parsed_entities = await parse_query_with_llm(FULL_PROMPT_ADD)
+            
+            raw_prefs = parsed_entities.get("question_preferences")
+            final_prefs = {}
+            if isinstance(raw_prefs, dict):
+                for key, value in raw_prefs.items():
+                    if isinstance(key, str) and isinstance(value, int):
+                        final_prefs[key] = value
+            
+            if not final_prefs:
+                return PracticeChatOutput(assistant_response_text="你想增加什么类型的题目呢？可以说得更具体一点吗？", intent_detected=intent)
 
-        practice_topic = parsed_entities.get("practice_topic")
+            merge_prompt = f"""
+            你是一个AI出题助手，任务是基于一个【已有的练习集】和用户的【新增题目要求】，生成一个【全新的、完整的】练习集。
+
+            --- 已有的练习集 ---
+            【已有题目部分】:
+            {original_questions}
+
+            【已有答案部分】:
+            {original_answers}
+            ---
+
+            --- 用户的新增题目要求 ---
+            请在【已有题目部分】的基础上，增加以下新题目：
+            主题: {reliable_topic}
+            题型和数量: {final_prefs}
+            ---
+
+            **你的任务**:
+            返回一个完整的、合并后的新版本。
+
+            **输出格式规则 (必须严格遵守！)**:
+            1.  **题目区**: 你的输出必须先包含【所有旧题目】，然后紧接着是【所有新题目】。
+            2.  **分隔符**: 在所有题目结束后，另起一行，只包含 `---参考答案与解析---`。
+            3.  **答案区**: 在分隔符后，你的输出必须包含【所有旧答案】，然后紧接着是【所有新题目的答案】。
+
+            请现在开始生成**合并后的完整新版**：
+            """
+            system_message = "你是一个教学经验丰富的AI助教，擅长根据用户的指令修改和整合练习题。"
+            raw_generated_questions = get_llm_practice_questions(system_message, merge_prompt)
+            
+            service_input = PracticeQuestionsInput(student_id=input_data.student_id, practice_topic=reliable_topic, question_preferences=final_prefs)
+            new_questions_result = await generate_practice_questions_service(service_input, raw_generated_questions=raw_generated_questions)
+
+            if new_questions_result.error_message:
+                return PracticeChatOutput(assistant_response_text=f"抱歉，在处理题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
+            log_activity(
+                        db_conn,
+                        user_id=input_data.student_id,
+                        user_role="student",
+                        activity_type="PRACTICE_" + intent, # 动态记录是 ADD 还是 REWRITE
+                        details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
+                    )
+            
+            return PracticeChatOutput(
+                assistant_response_text="好的，已为你添加新题目。这是修改后的完整练习题：",
+                intent_detected=intent,
+                new_questions=new_questions_result
+            )
+            
+
+        # --- Branch 4: User wants to rewrite the questions (Your intelligent rewrite logic) ---
+        elif intent == "REWRITE_QUESTIONS":
+            if not input_data.active_catalog_id:
+                return PracticeChatOutput(assistant_response_text="我需要先为你出一套题，才能在它的基础上修改哦。", intent_detected=intent)
+
+            # Get old question text and reliable topic from DB
+            original_questions = ""
+            reliable_topic = "相关主题"
+            if practice_set_details:
+                original_questions = practice_set_details.get("question_text", "")
+                concepts_str = practice_set_details.get("concepts_covered", "")
+                try:
+                    reliable_topic = json.loads(concepts_str)[0] if concepts_str else "相关主题"
+                except (json.JSONDecodeError, IndexError):
+                    pass
+
+            if not original_questions:
+                return PracticeChatOutput(assistant_response_text="抱歉，我找不到你上一轮的题目了，我们重新开始吧？", intent_detected=intent)
+
+            prompt_step1_questions = f"""
+            你是一个非常智能且严格遵守指令的AI出题专家。你的任务是根据用户的反馈，重写一套练习题的【题目部分】。
+
+            --- 这是上一轮的题目，你需要先分析它的【题型和数量】 ---
+            {original_questions}
+            ---
+
+            --- 这是用户的【修改要求】 ---
+            "{input_data.new_query}"
+            ---
+
+            **你的核心任务 (必须严格遵守):**
+
+            1.  **分析**: 在你的“脑中”分析【上一轮的题目】，搞清楚它的【题型和数量】。例如，你可能会分析出它是 "3道编程题"。
+            
+            2.  **重写**:
+                *   **完全抛弃**旧的题目内容。
+                *   **严格保持**你刚才分析出的【题型和数量】不变。
+                *   根据用户的【修改要求】（例如：更简单），并围绕【主题】"{reliable_topic}"，从零开始生成一套全新的题目。
+                *   **=> 换句话说：如果上一轮是3道编程题，用户说“太难了”，你就必须生成3道更简单的【编程题】，而不是换成选择题。**
+
+            3.  **输出要求**: 你的输出【只能包含新题目的题干】，绝对不能包含任何答案、解析或"---参考答案与解析---"这样的分隔符。
+
+            请现在只输出【新的题目部分】：
+            """
+            system_message_step1 = "你是一个只负责出题的AI专家，不提供答案。"
+            generated_questions_only = get_llm_practice_questions(system_message_step1, prompt_step1_questions)
+
+            if not generated_questions_only or not generated_questions_only.strip():
+                return PracticeChatOutput(assistant_response_text="抱歉，我在构思新题目时遇到了问题。", intent_detected=intent)
+
+            prompt_step2_answers = f"""
+            你是一个AI解题专家。你的任务是为以下提供的题目，生成详细的答案和解析。
+
+            --- 需要解答的题目 ---
+            {generated_questions_only}
+            ---
+
+            **你的任务**:
+            为上面提供的【每一道题】，都生成对应的【答案和解析】。对于编程题，答案必须包含可运行的代码。
+            你的输出【只能包含答案和解析部分】，不要重复题目，也不要包含"---参考答案与解析---"这样的分隔符。
+
+            请现在只输出【答案和解析部分】：
+            """
+            system_message_step2 = "你是一个只负责解题和写解析的AI专家。"
+            generated_answers_only = get_llm_practice_questions(system_message_step2, prompt_step2_answers)
+
+            if not generated_answers_only or not generated_answers_only.strip():
+                return PracticeChatOutput(assistant_response_text="抱歉，我想出了题目但没想出答案。", intent_detected=intent)
+
+            # === Step 2.3: Combine them in reliable Python code ===
+            raw_generated_questions = f"{generated_questions_only.strip()}\n\n---参考答案与解析---\n\n{generated_answers_only.strip()}"
+            
+            # Step 2.4: Call the unified downstream service to save and format the result.
+            service_input = PracticeQuestionsInput(
+                student_id=input_data.student_id, 
+                practice_topic=reliable_topic, 
+                question_preferences={} # This is okay, as the LLM handled type/quantity internally
+            )
+            new_questions_result = await generate_practice_questions_service(service_input, raw_generated_questions=raw_generated_questions)
+
+            if new_questions_result.error_message:
+                return PracticeChatOutput(assistant_response_text=f"抱歉，在处理题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
+            log_activity(
+                        db_conn,
+                        user_id=input_data.student_id,
+                        user_role="student",
+                        activity_type="PRACTICE_" + intent, 
+                        details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
+                    )
+            
+            return PracticeChatOutput(
+                assistant_response_text="好的，这是根据你的要求修改后的完整练习题：",
+                intent_detected=intent,
+                new_questions=new_questions_result
+            )
         
-        raw_prefs = parsed_entities.get("question_preferences")
-        cleaned_prefs = {}
-        if isinstance(raw_prefs, dict):
-            for key, value in raw_prefs.items():
-                if isinstance(key, str) and isinstance(value, int):
-                    cleaned_prefs[key] = value
-        
-        final_prefs = cleaned_prefs or {"选择题": 2, "简答题": 1}
-
-        service_input = PracticeQuestionsInput(student_id=input_data.student_id, practice_topic=practice_topic, question_preferences=final_prefs)
-        new_questions_result = await generate_practice_questions_service(service_input)
-        log_activity(
-                    db_conn,
-                    user_id=input_data.student_id,
-                    user_role="student",
-                    activity_type="GENERATE_NEW_PRACTICE",
-                    details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
-                )
-        if new_questions_result.error_message:
-             return PracticeChatOutput(assistant_response_text=f"抱歉，生成题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
-        
-        return PracticeChatOutput(
-            assistant_response_text="好的，这是为你准备的新题目：",
-            intent_detected=intent,
-            new_questions=new_questions_result
-        )
-
-    # --- Branch 3: User wants to add more questions (Merge Logic) ---
-    elif intent == "ADD_QUESTIONS":
-        if not input_data.active_catalog_id:
-            return PracticeChatOutput(assistant_response_text="我需要先为你出一套题，才能在它的基础上修改哦。", intent_detected=intent)
-
-        # Get old questions and reliable topic from DB
-        db_conn = None
-        original_questions, reliable_topic = "", "相关主题"
-        try:
-            db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
-            if db_conn:
-                cursor = db_conn.cursor(dictionary=True)
-                # We need to get original_answers as well now
-                cursor.execute("SELECT question_text, model_answer, concepts_covered FROM practice_questions_catalog WHERE catalog_id = %s", (input_data.active_catalog_id,))
-                old_set = cursor.fetchone()
-                if old_set:
-                    original_answers = old_set.get("model_answer", "")
-                    original_questions = old_set.get("question_text", "")
-                    concepts_str = old_set.get("concepts_covered", "")
-                    try: reliable_topic = json.loads(concepts_str)[0] if concepts_str else "相关主题"
-                    except (json.JSONDecodeError, IndexError): pass
-        finally:
-            if db_conn and db_conn.is_connected(): db_conn.close()
-
-        if not original_questions:
-            return PracticeChatOutput(assistant_response_text="抱歉，我找不到你上一轮的题目了，我们重新开始吧？", intent_detected=intent)
-        
-        # Use NLP to get ONLY the new preferences to add
-        nlp_prompt_add = """
-        你是一个分析专家。你的任务是从以下用户的【新增指令】中，提取出【明确的题目偏好】。
-        ---
-        "{new_query}"
-        ---
-        你需要提取一个名为 "question_preferences" 的JSON对象，它只包含【题型:数量】的键值对。
-        **规则:**
-        1. 键必须是字符串(题型)，值必须是整数(数量)。
-        2. 如果用户提到了题型但数量模糊（例如 "几道选择题"），你【必须】使用默认数量 `3`。
-        3. 如果用户没有提到任何题型，返回一个空对象 `{{}}`。
-        
-        **示例:**
-        - 输入: "再来2道编程题" -> 输出: `{{"question_preferences": {{"编程题": 2}}}}`
-        - 输入: "再出几道选择题吧" -> 输出: `{{"question_preferences": {{"选择题": 3}}}}`
-        """
-        FULL_PROMPT_ADD = nlp_prompt_add.format(new_query=input_data.new_query)
-        parsed_entities = await parse_query_with_llm(FULL_PROMPT_ADD)
-        
-        raw_prefs = parsed_entities.get("question_preferences")
-        final_prefs = {}
-        if isinstance(raw_prefs, dict):
-            for key, value in raw_prefs.items():
-                if isinstance(key, str) and isinstance(value, int):
-                    final_prefs[key] = value
-        
-        if not final_prefs:
-             return PracticeChatOutput(assistant_response_text="你想增加什么类型的题目呢？可以说得更具体一点吗？", intent_detected=intent)
-
-        merge_prompt = f"""
-        你是一个AI出题助手，任务是基于一个【已有的练习集】和用户的【新增题目要求】，生成一个【全新的、完整的】练习集。
-
-        --- 已有的练习集 ---
-        【已有题目部分】:
-        {original_questions}
-
-        【已有答案部分】:
-        {original_answers}
-        ---
-
-        --- 用户的新增题目要求 ---
-        请在【已有题目部分】的基础上，增加以下新题目：
-        主题: {reliable_topic}
-        题型和数量: {final_prefs}
-        ---
-
-        **你的任务**:
-        返回一个完整的、合并后的新版本。
-
-        **输出格式规则 (必须严格遵守！)**:
-        1.  **题目区**: 你的输出必须先包含【所有旧题目】，然后紧接着是【所有新题目】。
-        2.  **分隔符**: 在所有题目结束后，另起一行，只包含 `---参考答案与解析---`。
-        3.  **答案区**: 在分隔符后，你的输出必须包含【所有旧答案】，然后紧接着是【所有新题目的答案】。
-
-        请现在开始生成**合并后的完整新版**：
-        """
-        system_message = "你是一个教学经验丰富的AI助教，擅长根据用户的指令修改和整合练习题。"
-        raw_generated_questions = get_llm_practice_questions(system_message, merge_prompt)
-        
-        service_input = PracticeQuestionsInput(student_id=input_data.student_id, practice_topic=reliable_topic, question_preferences=final_prefs)
-        new_questions_result = await generate_practice_questions_service(service_input, raw_generated_questions=raw_generated_questions)
-
-        if new_questions_result.error_message:
-            return PracticeChatOutput(assistant_response_text=f"抱歉，在处理题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
-        log_activity(
-                    db_conn,
-                    user_id=input_data.student_id,
-                    user_role="student",
-                    activity_type="PRACTICE_" + intent, # 动态记录是 ADD 还是 REWRITE
-                    details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
-                )
-        return PracticeChatOutput(
-            assistant_response_text="好的，已为你添加新题目。这是修改后的完整练习题：",
-            intent_detected=intent,
-            new_questions=new_questions_result
-        )
-
-    # --- Branch 4: User wants to rewrite the questions (Your intelligent rewrite logic) ---
-    elif intent == "REWRITE_QUESTIONS":
-        if not input_data.active_catalog_id:
-            return PracticeChatOutput(assistant_response_text="我需要先为你出一套题，才能在它的基础上修改哦。", intent_detected=intent)
-
-        # Step 1: Get old question text and reliable topic from DB
-        db_conn = None
-        original_questions = ""
-        reliable_topic = "相关主题"
-        try:
-            db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
-            if db_conn:
-                cursor = db_conn.cursor(dictionary=True)
-                cursor.execute("SELECT question_text, concepts_covered FROM practice_questions_catalog WHERE catalog_id = %s", (input_data.active_catalog_id,))
-                old_set = cursor.fetchone()
-                if old_set:
-                    original_questions = old_set.get("question_text", "")
-                    concepts_str = old_set.get("concepts_covered", "")
-                    try:
-                        reliable_topic = json.loads(concepts_str)[0] if concepts_str else "相关主题"
-                    except (json.JSONDecodeError, IndexError):
-                        pass
-        finally:
-            if db_conn and db_conn.is_connected(): db_conn.close()
-
-        if not original_questions:
-            return PracticeChatOutput(assistant_response_text="抱歉，我找不到你上一轮的题目了，我们重新开始吧？", intent_detected=intent)
-
-        # --- 【核心修正：采用两步生成，并在第一步中注入智能分析指令】 ---
-
-        # === Step 2.1: Generate ONLY the new, rewritten questions ===
-        prompt_step1_questions = f"""
-        你是一个非常智能且严格遵守指令的AI出题专家。你的任务是根据用户的反馈，重写一套练习题的【题目部分】。
-
-        --- 这是上一轮的题目，你需要先分析它的【题型和数量】 ---
-        {original_questions}
-        ---
-
-        --- 这是用户的【修改要求】 ---
-        "{input_data.new_query}"
-        ---
-
-        **你的核心任务 (必须严格遵守):**
-
-        1.  **分析**: 在你的“脑中”分析【上一轮的题目】，搞清楚它的【题型和数量】。例如，你可能会分析出它是 "3道编程题"。
-        
-        2.  **重写**:
-            *   **完全抛弃**旧的题目内容。
-            *   **严格保持**你刚才分析出的【题型和数量】不变。
-            *   根据用户的【修改要求】（例如：更简单），并围绕【主题】"{reliable_topic}"，从零开始生成一套全新的题目。
-            *   **=> 换句话说：如果上一轮是3道编程题，用户说“太难了”，你就必须生成3道更简单的【编程题】，而不是换成选择题。**
-
-        3.  **输出要求**: 你的输出【只能包含新题目的题干】，绝对不能包含任何答案、解析或"---参考答案与解析---"这样的分隔符。
-
-        请现在只输出【新的题目部分】：
-        """
-        system_message_step1 = "你是一个只负责出题的AI专家，不提供答案。"
-        generated_questions_only = get_llm_practice_questions(system_message_step1, prompt_step1_questions)
-
-        if not generated_questions_only or not generated_questions_only.strip():
-            return PracticeChatOutput(assistant_response_text="抱歉，我在构思新题目时遇到了问题。", intent_detected=intent)
-
-        # === Step 2.2: Generate ONLY the answers for the questions from Step 1 ===
-        prompt_step2_answers = f"""
-        你是一个AI解题专家。你的任务是为以下提供的题目，生成详细的答案和解析。
-
-        --- 需要解答的题目 ---
-        {generated_questions_only}
-        ---
-
-        **你的任务**:
-        为上面提供的【每一道题】，都生成对应的【答案和解析】。对于编程题，答案必须包含可运行的代码。
-        你的输出【只能包含答案和解析部分】，不要重复题目，也不要包含"---参考答案与解析---"这样的分隔符。
-
-        请现在只输出【答案和解析部分】：
-        """
-        system_message_step2 = "你是一个只负责解题和写解析的AI专家。"
-        generated_answers_only = get_llm_practice_questions(system_message_step2, prompt_step2_answers)
-
-        if not generated_answers_only or not generated_answers_only.strip():
-            return PracticeChatOutput(assistant_response_text="抱歉，我想出了题目但没想出答案。", intent_detected=intent)
-
-        # === Step 2.3: Combine them in reliable Python code ===
-        raw_generated_questions = f"{generated_questions_only.strip()}\n\n---参考答案与解析---\n\n{generated_answers_only.strip()}"
-        
-        # Step 2.4: Call the unified downstream service to save and format the result.
-        service_input = PracticeQuestionsInput(
-            student_id=input_data.student_id, 
-            practice_topic=reliable_topic, 
-            question_preferences={} # This is okay, as the LLM handled type/quantity internally
-        )
-        new_questions_result = await generate_practice_questions_service(service_input, raw_generated_questions=raw_generated_questions)
-
-        if new_questions_result.error_message:
-            return PracticeChatOutput(assistant_response_text=f"抱歉，在处理题目时出错了: {new_questions_result.error_message}", intent_detected=intent)
-        log_activity(
-                    db_conn,
-                    user_id=input_data.student_id,
-                    user_role="student",
-                    activity_type="PRACTICE_" + intent, 
-                    details={"new_catalog_id": new_questions_result.catalog_id, "based_on_id": input_data.active_catalog_id}
-                )
-        return PracticeChatOutput(
-            assistant_response_text="好的，这是根据你的要求修改后的完整练习题：",
-            intent_detected=intent,
-            new_questions=new_questions_result
-        )
-    
-    # --- Branch 5: Fallback for any other unhandled case ---
-    else: # UNKNOWN
-        return PracticeChatOutput(
-            assistant_response_text="我不太确定该怎么做，你可以尝试让我“出题”、“修改题目”或者直接“提交你的答案”。",
-            intent_detected="UNKNOWN"
-        )
+        # --- Branch 5: Fallback for any other unhandled case ---
+        else: # UNKNOWN
+            return PracticeChatOutput(
+                assistant_response_text="我不太确定该怎么做，你可以尝试让我“出题”、“修改题目”或者直接“提交你的答案”。",
+                intent_detected="UNKNOWN"
+            )
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
     
 async def _identify_assessment_intent(chat_history: List[ChatMessage], new_query: str) -> IntentType:
     print("SERVICE : Identifying user intent...")
@@ -584,18 +603,16 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
 
 async def generate_initial_teaching_plan_service(
 
-    initial_outline: str, # Used for RAG query and as initial_human_task
+    initial_outline: str, 
     style_tone:str,
     output_structure:str
-    # LLM and Embeddings will be initialized inside, using env vars for keys
-) -> tuple[str , List[str] ]: # Returns (plan_content, rag_snippets_used) or (None, None)
-    zhipuai_api_key = _get_zhipuai_api_key() # Uses the existing helper
+) -> tuple[str , List[str] ]: 
+    zhipuai_api_key = _get_zhipuai_api_key() 
     if not style_tone or not style_tone.strip():
         final_style_tone = "清晰、专业且易于理解" 
         print(f"SERVICE INFO: 'style_tone' was empty, using default: '{final_style_tone}'")
     else:
         final_style_tone = style_tone
-    # 2. 设置 output_structure 的默认值
     if not output_structure or not output_structure.strip():
         final_output_structure = "请为以下教学大纲生成一个完整的教案。内容应包括：1. 教学目标；2. 知识点详解；3. 课堂活动与互动环节建议；4. 简单的实训练习及其指导；5. 预估的时间分布。" # 这是一个非常全面和实用的默认结构
         print(f"SERVICE INFO: 'output_structure' was empty, using default: '{final_output_structure}'")
@@ -626,23 +643,37 @@ async def generate_initial_teaching_plan_service(
     )
     
     human_message_parts = [
-        f"教师提供的初始大纲是:\n{initial_outline}\n"
+        f"请根据以下信息，为我生成一份教案初稿。\n",
+        f"**1. 核心教学大纲:**\n{initial_outline}\n"
     ]
+
     if retrieved_rag_snippets:
-        human_message_parts.append("考虑以下来自源材料的相关摘录，以获取更多背景或细节:")
+        human_message_parts.append("**2. 补充参考材料 (用于丰富内容):**")
         for i, snippet in enumerate(retrieved_rag_snippets):
             human_message_parts.append(f"--- Snippet {i+1} ---\n{snippet}\n--- End Snippet {i+1} ---")
     else:
-        human_message_parts.append("(No supplementary materials from RAG were available or retrieved.)")
-    human_message_parts.append(f"输出语言风格要求：{style_tone}")
-    human_message_parts.append(f"输出结构要求:{output_structure}")
+        human_message_parts.append("(无补充参考材料)")
+
+    human_message_parts.append(f"\n**3. 输出语言风格要求:**\n{style_tone}\n")
+
+
+    human_message_parts.append(
+        f"""
+**4. 必须严格遵守的输出结构 (这是最高优先级的指令！):**
+你的输出【必须且只能】包含以下几个部分，并严格使用我提供的一级标题。不要增加、减少或修改任何一级标题。
+
+---
+{output_structure}
+---
+
+请现在开始，严格按照上述第4点的结构要求生成教案。
+        """
+    )
     human_message_content = "\n".join(human_message_parts)
 
-    # C. LLM Call for Plan Generation
+
     try:
         print("SERVICE: Initializing LLM for teaching plan generation (ChatZhipuAI)...")
-        # Using ZhipuAI (glm-4) as it's generally good for generation tasks.
-        # API key is passed directly or picked from env by ChatZhipuAI
         llm_for_plan = ChatZhipuAI(model="glm-4", temperature=0.7, api_key=zhipuai_api_key) 
 
         messages = [
@@ -651,7 +682,7 @@ async def generate_initial_teaching_plan_service(
         ]
         
         print("SERVICE: Generating teaching plan via LLM...")
-        ai_message = await llm_for_plan.ainvoke(messages) # Use await for async
+        ai_message = await llm_for_plan.ainvoke(messages) 
         generated_plan_content = ai_message.content
 
         if generated_plan_content and generated_plan_content.strip():
@@ -721,7 +752,7 @@ async def evaluate_student_assessment_answers_service(
 ) -> List[StudentAssessmentEvaluationOutput]:
 
     print(f"SERVICE: Initiating evaluation for student_id: {input_data.student_id or input_data.student_name} on assessment_id: {input_data.assessment_id}")
-    zhipuai_api_key = _get_zhipuai_api_key() # For ChatZhipuAI used in assessment_evaluation.py
+    zhipuai_api_key = _get_zhipuai_api_key() 
     results: List[StudentAssessmentEvaluationOutput] = []
     db_conn = None
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
@@ -730,7 +761,6 @@ async def evaluate_student_assessment_answers_service(
         if not db_conn:
             raise Exception("Failed to connect to the database.")
 
-        # 1. Get/Create Student ID
         actual_student_id = input_data.student_id
         
         assessment_data = get_assessment_content_by_id(db_conn, input_data.assessment_id)
@@ -810,15 +840,7 @@ async def generate_practice_questions_service(
     input_data: PracticeQuestionsInput,
     raw_generated_questions: Optional[str] = None
 ) -> PracticeQuestionsOutput:
-    """
-    Generates or processes practice questions. If raw_generated_questions is provided,
-    it processes and saves that. Otherwise, it generates new questions from scratch.
-    This version uses a robust regex for splitting questions and answers to handle
-    minor LLM formatting errors.
-    """
     print(f"SERVICE: Generating/Saving practice questions for topic: {input_data.practice_topic}")
-    
-    # If raw content isn't provided, generate it now.
     if raw_generated_questions is None:
         print("SERVICE: No raw content provided, generating from scratch...")
         history_summary = "No specific student performance history provided."
@@ -848,19 +870,10 @@ async def generate_practice_questions_service(
             prompt_components["human_message"]
         )
 
-    # Unified processing and saving logic
     db_conn_save = None
     try:
         if not (raw_generated_questions and raw_generated_questions.strip()):
             return PracticeQuestionsOutput(generated_questions=[], error_message="AI未能生成练习题内容。")
-
-        # --- 【核心修正点：使用正则表达式进行宽容分割】 ---
-        # Regex to find "---参考答案与解析---" with potential variations
-        # It allows for:
-        # - Optional leading/trailing whitespace/newlines (\s*)
-        # - Optional hyphens at the start (---)?
-        # - The core text "参考答案与解析"
-        # - Optional hyphens at the end (---)?
         separator_pattern = re.compile(r'\s*---?\s*参考答案与解析\s*---?\s*', re.IGNORECASE)
         
         match = separator_pattern.search(raw_generated_questions)
@@ -889,9 +902,9 @@ async def generate_practice_questions_service(
 
         if catalog_id:
             generated_item = PracticeQuestionItem(question_text=all_questions_text, model_answer=all_answers_text)
-            return PracticeQuestionsOutput(generated_questions=[generated_item], catalog_id=catalog_id)
+            return PracticeQuestionsOutput(generated_questions=generated_item, catalog_id=catalog_id)
         else:
-            return PracticeQuestionsOutput(generated_questions=[], error_message="生成了练习题但保存至题库失败。")
+            return PracticeQuestionsOutput(generated_questions=None, error_message="生成了练习题但保存至题库失败。")
             
     except Exception as e:
         # It's helpful to log the full exception for debugging
@@ -940,7 +953,7 @@ async def get_practice_feedback_service(
         {model_answers_text}
         ---
 
-    3.  **学生提交的全部回答:**
+    3.  **学生提交的全部回答 (作为一个整体):**
         ---
         {input_data.student_answer}
         ---
@@ -950,19 +963,19 @@ async def get_practice_feedback_service(
 
     1.  **总体评价 (Overall Comment)**: 首先，请对学生的整体作答情况给出一个简短、鼓励性的总体评价。
     2.  **逐题反馈 (Detailed Feedback)**: 接着，对学生回答的**每一个问题**，进行独立的分析和反馈。你需要：
-        a.  将学生的回答匹配到具体的题目。
+        a.  从【学生提交的全部回答】中，**精确地抽取出**针对当前题目的那部分回答。
         b.  判断该回答的正确性 (`Correct`, `Partially Correct`, `Incorrect`, `Not Answered`)。
         c.  给出有建设性的、详细的反馈。
     
-    **【输出格式 - 必须严格遵守】**
+    **【输出格式 - 必须严格遵守！】**
     你的输出必须是且只能是一个单一的JSON对象，结构如下：
     ```json
     {{
-      "overall_comment": "（这里是你的总体评价，例如：这次练习完成得很不错！对大部分知识点掌握得很好。）",
+      "overall_comment": "（这里是你的总体评价...）",
       "feedback_details": [
         {{
           "question_identifier": "（题目的原始标识符，如 '题目1'）",
-          "student_answer": "（你从学生回答中匹配到的、针对这个问题的具体内容）",
+          "student_answer": "（【必须】从学生回答中【原文复制】针对这个问题的具体内容。此字段【绝对不能】包含'见学生答案'、'如上'等任何占位符或缩写，必须是学生答案的原文。）",
           "correctness": "（'Correct', 'Partially Correct', 'Incorrect', 或 'Not Answered'）",
           "feedback": "（针对这个问题的详细反馈）"
         }},
@@ -970,7 +983,7 @@ async def get_practice_feedback_service(
       ]
     }}
     ```
-    - **重要**: `feedback_details` 数组必须包含对**试卷中所有题目**的反馈，即使学生没有回答某个问题（此时 `correctness` 应为 `Not Answered`）。
+    - **重要**: `feedback_details` 数组必须包含对**试卷中所有题目**的反馈，即使学生没有回答某个问题（此时 `student_answer` 应为空字符串 `""`，`correctness` 应为 `Not Answered`）。
 
     现在，请开始生成反馈JSON：
     """
@@ -992,15 +1005,14 @@ async def get_practice_feedback_service(
             elif correctness == "Partially Correct":
                 score += 0.5
     
-    # 计算准确率
+
         accuracy_percentage = (score / total_questions) * 100
-    # 将结果格式化为字符串，例如 "85.7%" 或 "A+"
-    # 这里我们直接存百分比字符串，因为它信息量大且可读
+
         overall_correctness_for_db = f"{accuracy_percentage:.1f}%"
     else:
         overall_correctness_for_db = "N/A" # 没有题目，无法评估
 
-# --- 2. 准备保存到数据库 ---
+
     feedback_for_db = json.dumps(feedback_details_raw, ensure_ascii=False)
 
     db_conn = None
@@ -1033,7 +1045,8 @@ async def get_practice_feedback_service(
     return PracticeFeedbackOutput(
         attempt_id=attempt_id,
         overall_comment=overall_comment,
-        feedback_details=feedback_items
+        feedback_details=feedback_items,
+        error_message=None
     )
 
 # Helper function to convert Pydantic ChatMessage to Langchain messages
@@ -1051,32 +1064,26 @@ def convert_chat_messages_to_langchain_format(chat_history: List[ChatMessage], n
 
 async def refine_student_question_service(input_data: RefineStudentQAInput) -> StudentQuestionOutput:
     print(f"SERVICE: Refining student question for student_id: {input_data.student_id}")
-    # ... (其他初始化)
     rag_snippets = []
     llm_answer = "Could not determine a refined answer."
     error_message = None
 
     try:
-        # --- 1. 【新增】查询重写 ---
         standalone_query_for_rag = await _rewrite_query_with_history(input_data.history, input_data.new_query)
         
-        # --- 2. 【修改】使用重写后的查询进行RAG搜索 ---
         try:
             embeddings = ZhipuAIEmbeddings() 
         except Exception as e:
-            # ... (错误处理)
             pass
 
         rag_snippets = search_knowledge_base_for_answer(
-            student_question=standalone_query_for_rag, # <--- 使用重写后的查询
+            student_question=standalone_query_for_rag, 
             embeddings_model_instance=embeddings,
             vector_store_dir=CHROMA_PERSIST_DIR,
             top_k=10 
         )
         print(f"SERVICE (Refine): RAG search retrieved {len(rag_snippets)} snippets for rewritten query.")
 
-        # --- 3. 【保持不变】生成最终答案 ---
-        # 准备LangChain消息列表 (这部分你的代码应该已经有了)
         history_langchain_messages = []
         for msg in input_data.history:
             if msg.role == "user" :
@@ -1097,11 +1104,11 @@ async def refine_student_question_service(input_data: RefineStudentQAInput) -> S
         if llm_response:
             llm_answer = llm_response
         else:
-            # ... (错误处理)
+
             pass
 
     except Exception as e:
-        # ... (错误处理)
+
         pass
 
     return StudentQuestionOutput(
@@ -1111,199 +1118,250 @@ async def refine_student_question_service(input_data: RefineStudentQAInput) -> S
         error_message=error_message
     )
 
-async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> tuple[str , List[str]]:
+
+async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> tuple[str, str, List[str]]:
+    print(f"SERVICE: Starting refine process for teaching plan ID: {input_data.base_teaching_plan_id}")
+
     user_intent = await _identify_user_intent(input_data.history, input_data.new_query)
-    print(f"SERVICE: Refining teaching plan for teacher_id: {input_data.teacher_id}")
-    zhipuai_api_key = _get_zhipuai_api_key()
-    retrieved_rag_snippets = []
-    generated_plan_content = None
     db_conn = None
     original_plan_content = ""
+    original_title = "未命名教案"
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
+    zhipuai_api_key = _get_zhipuai_api_key() 
+
     try:
-            if input_data.base_teaching_plan_id:
-                db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
-                if db_conn:
-                    original_plan = get_teaching_plan_by_id(db_conn, input_data.base_teaching_plan_id)
-                    if original_plan and original_plan.get('content'):
-                        original_plan_content = original_plan['content']
-                        print(f"SERVICE (Refine): Loaded original content from plan ID {input_data.base_teaching_plan_id}.")
-                    if original_plan_content:
-                        original_content_message = ChatMessage(
-                            role="system", 
-                            content=f"你正在修改以下这份原始教案：\n\n--- 原始教案开始 ---\n{original_plan_content}\n--- 原始教案结束 ---"
-                        )
-                        input_data.history.insert(0, original_content_message)
-                else:
-                    print("SERVICE (Refine): Could not connect to DB to fetch original plan.")
-            standalone_query_for_rag = await _rewrite_teaching_plan_query(input_data.history, input_data.new_query)
-            try:
-                embeddings_for_rag = ZhipuAIEmbeddings()
-                if os.path.exists(CHROMA_PERSIST_DIR):
-                    vector_store = Chroma(persist_directory=CHROMA_PERSIST_DIR, embedding_function=embeddings_for_rag)
-                    rag_docs = vector_store.similarity_search(standalone_query_for_rag, k=5) 
-                    if rag_docs:
-                        retrieved_rag_snippets = [doc.page_content for doc in rag_docs]
-                        print(f"SERVICE (Refine): Retrieved {len(retrieved_rag_snippets)} RAG snippets for rewritten query.")
-                else:
-                    print("SERVICE WARNING (Refine): Chroma DB directory not found.")
-            except Exception as e:
-                print(f"SERVICE ERROR (Refine) during RAG for teaching plan: {e}.")
-            langchain_messages = convert_chat_messages_to_langchain_format(input_data.history, input_data.new_query)
-            if user_intent == "REWRITE":
-                system_prompt = "根据用户的最新指令，生成一份【全新】的考核试卷。请忽略所有历史和原始试卷内容。"
-            elif user_intent == "REVISION" or user_intent == "DELETION":
-                system_prompt = "根据原始试卷和用户的最新指令，生成一份【修改后】的【完整】考核试卷。你的输出应该是替换掉整个旧试卷的新版本。"
-            else: 
-                system_prompt = "根据原始试卷和用户的最新指令，【只生成需要新增或修改】的那部分内容。不要重复原始试卷中未被修改的部分。"
-            final_messages_for_llm = [SystemMessage(content=system_prompt)] + langchain_messages 
-            if retrieved_rag_snippets:
-                rag_context_str = "\n\n--- 相关参考资料 ---\n" + "\n---\n".join(retrieved_rag_snippets)
-                if isinstance(final_messages_for_llm[-1], HumanMessage):
-                    final_messages_for_llm[-1].content += rag_context_str
+        db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
+        if db_conn and input_data.base_teaching_plan_id:
+            original_plan = get_teaching_plan_by_id(db_conn, input_data.base_teaching_plan_id)
+            if original_plan:
+                original_title = original_plan.get('title', '未命名教案')
+                original_plan_content = original_plan.get('content', '').strip()
+
+        final_full_content = None
+
+        if user_intent == "INCREMENTAL_ADD":
+            print(f"SERVICE: Handling {user_intent} for teaching plan with dedicated creation-then-append flow.")
+            
+            # 1. LLM 创作新内容
+            creation_prompt = f"""
+            你是一位教案设计专家。你的任务是根据一个【核心主题】和用户的【补充要求】，创作出【新增的教案章节】。
+            核心主题: **{original_title}**
+            用户的补充要求: **{input_data.new_query}**
+            你的输出【只应包含你新创作的章节内容】，不要重复任何已有内容。
+            """
+
             llm_for_plan = ChatZhipuAI(model="glm-4", temperature=0.7, api_key=zhipuai_api_key)
-            print("SERVICE (Refine): Generating refined teaching plan via LLM...")
-            ai_message = await llm_for_plan.ainvoke(final_messages_for_llm)
-            generated_content = ai_message.content
-            if user_intent == "INCREMENTAL_ADD":
-                print("SERVICE: Handling INCREMENTAL_ADD. Appending new content.")
-                final_full_content = (
-            f"{original_plan_content}\n\n"
-            f"--- 更新于 {datetime.now().strftime('%Y-%m-%d %H:%M')} ---\n\n"
-            f"{generated_content}"
-        )
-    
-            elif user_intent == "REVISION" or user_intent == "DELETION":
-                print(f"SERVICE: Handling {user_intent}. Replacing original content with new version.")
-                final_full_content = generated_content
+            generated_new_content = await llm_for_plan.ainvoke(creation_prompt)
+            generated_new_content = generated_new_content.content # 提取内容
 
-            elif user_intent == "REWRITE":
-                print("SERVICE: Handling REWRITE. Replacing original content with new version.")
-                final_full_content = generated_content
+            if not generated_new_content or not generated_new_content.strip():
+                raise Exception("LLM failed to generate new content for the ADD request.")
 
-            else: # UNKNOWN 或其他未处理的意图
-                print("SERVICE: Intent is UNKNOWN. Defaulting to incremental add behavior.")
-                # 默认行为：为了安全起见，我们选择最常见的“增量添加”作为默认操作。
-                final_full_content = (
-            f"{original_plan_content}\n\n"
-            f"--- 更新于 {datetime.now().strftime('%Y-%m-%d %H:%M')} ---\n\n"
-            f"[意图未知，内容已附加]：\n{generated_content}"
-        )
+            # 2. Python 代码负责拼接
+            final_full_content = (
+                f"{original_plan_content}\n\n"
+                f"--- 更新于 {datetime.now().strftime('%Y-%m-%d %H:%M')} ---\n\n"
+                f"{generated_new_content}"
+            )
 
- 
-            if final_full_content is None:
-                print("SERVICE ERROR: No final content was constructed due to logic error.")
-                return None, [] # 返回空，让上层处理
+        else: # REVISION, DELETION, REWRITE 走一个统一的、更强大的直接生成流程
+            print(f"SERVICE: Handling {user_intent} for teaching plan with direct full-regeneration flow.")
+            
+            system_prompt = "你是一位经验丰富的教师和教案设计专家。你的任务是根据提供的原始教案和用户的修改指令，生成一份修改后的、全新的、完整的教案。"
+            human_prompt_parts = [
+                f"--- 原始教案 (供你参考和修改) ---\n{original_plan_content}\n--- 原始教案结束 ---",
+            ]
 
-            return final_full_content, rag_context_str
+            if user_intent in ["REVISION", "DELETION"]:
+                human_prompt_parts.append(
+                    "**【核心任务：修改教案】**\n请在继承原始教案的基础上，根据用户的最新指令进行修改。你的输出必须是修改后的【完整新版本】。"
+                )
+            else: # REWRITE
+                human_prompt_parts.append(
+                    "**【核心任务：重写教案】**\n请【完全忽略】上述原始教案，根据用户最新指令，从零开始创作一份【全新的、完整的】教案。"
+                )
+            
+            human_prompt_parts.append(f"用户的最新指令是：'{input_data.new_query}'")
+            human_prompt_content = "\n\n".join(human_prompt_parts)
+            
+            llm_for_plan = ChatZhipuAI(model="glm-4", temperature=0.7, api_key=zhipuai_api_key)
+            ai_message = await llm_for_plan.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt_content)
+            ])
+            final_full_content = ai_message.content
+
+        # 生成标题并返回
+        new_title = await _generate_semantic_title_for_refinement(original_title, input_data.new_query)
+        if final_full_content is None:
+            raise Exception("Failed to construct final content.")
+        
+        # RAG 部分在追问中可以简化或移除，这里返回空列表
+        return new_title, final_full_content, []
 
     except Exception as e:
-            print(f"SERVICE ERROR (Refine) in refine_teaching_plan_service: {e}")
-            return None, []
+        import traceback
+        traceback.print_exc()
+        print(f"SERVICE ERROR in refine_teaching_plan_service: {e}")
+        return None, None, []
     finally:
-            if db_conn and db_conn.is_connected():
-                db_conn.close()
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
     
 
+def _apply_structured_edits(original_q_text, original_a_text, instructions, answer_separator):
+    q_to_delete_identifiers = set(instructions.get("questions_to_delete", []))
+    q_to_add = instructions.get("questions_to_add", [])
+
+    # --- 1. 精确解析原始题目和答案 ---
+    def parse_content(text_content):
+        # 按 "题目X" 分割，同时保留题号
+        # 使用 findall 来捕获所有题目块
+        pattern = r'(题目\s*\d+\s*[:：.][\s\S]*?)(?=\n题目\s*\d+\s*[:：.]|\Z)'
+        items = re.findall(pattern, text_content)
         
-async def refine_assessment_service(input_data: RefineAssessmentInput) -> tuple[str, list, str ]:
-    print(f"SERVICE: Starting refine process for assessment ID: {input_data.base_assessment_id}")
+        # 将其转换为 { "题目1": "题目1的完整内容...", "题目2": "..." } 的字典
+        item_dict = {}
+        for item in items:
+            match = re.match(r'(题目\s*\d+)', item.strip())
+            if match:
+                item_id = match.group(1).replace(" ", "")
+                item_dict[item_id] = item.strip()
+        return item_dict
+
+    # 找到原始试卷中所有题型的大标题，并保留它们的顺序
+    original_type_titles = re.findall(r'^[一二三四五六七八九十、\w\s]+题$', original_q_text, re.MULTILINE)
+
+    original_questions_dict = parse_content(original_q_text)
+    original_answers_dict = parse_content(original_a_text)
+
+    # --- 2. 执行删除操作 ---
+    for del_id in q_to_delete_identifiers:
+        if del_id in original_questions_dict:
+            del original_questions_dict[del_id]
+        if del_id in original_answers_dict:
+            del original_answers_dict[del_id]
+            
+    # --- 3. 执行添加操作 ---
+    for new_q_obj in q_to_add:
+        q_text = new_q_obj.get("question_text", "")
+        a_text = new_q_obj.get("model_answer", "")
+        
+        # 从新题目文本中提取题号
+        match = re.match(r'(题目\s*\d+)', q_text.strip())
+        if match:
+            new_q_id = match.group(1).replace(" ", "")
+            original_questions_dict[new_q_id] = q_text
+            original_answers_dict[new_q_id] = a_text
     
+    # --- 4. 重新组装试卷 ---
+    # 首先，按题号对字典进行排序，以保持正确的题目顺序
+    sorted_q_ids = sorted(original_questions_dict.keys(), key=lambda x: int(re.search(r'\d+', x).group()))
+
+    new_questions_section = "\n\n".join([original_questions_dict[qid] for qid in sorted_q_ids])
+
+    # 构建答案区
+    new_answers_section = "\n\n".join([original_answers_dict.get(qid, "") for qid in sorted_q_ids])
+
+    return f"{new_questions_section}\n\n{answer_separator}\n\n{new_answers_section}"
+
+
+async def refine_assessment_service(input_data: RefineAssessmentInput) -> tuple[str, str, list, str]:
+    print(f"SERVICE: Starting refine process for assessment ID: {input_data.base_assessment_id}")
+
     user_intent = await _identify_assessment_intent(input_data.history, input_data.new_query)
     db_conn = None
     original_assessment_content = ""
     original_answers_text = ""
-    original_subject = None  
+    original_subject = None
+    original_title = "未命名考核"
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
-    answer_separator = "参考答案与解析"
-    
+    answer_separator = "---参考答案与解析---"
+
     try:
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
-        if db_conn:
-                original_assessment = get_assessment_details_by_id(db_conn, input_data.base_assessment_id)
-                if original_assessment:
-                    original_assessment_content = original_assessment.get('content', '')
-                    original_answers_text = original_assessment.get('answers_text', '') 
-                    original_subject = original_assessment.get('subject') 
-                    if original_assessment_content:
-                        input_data.history.insert(0, ChatMessage(
-                            role="system",
-                            content=f"你正在修改以下这份原始试卷：\n\n--- 原始试卷开始 ---\n{original_assessment_content}\n--- 原始试卷结束 ---"
-                        ))
-
-        standalone_query_for_rag = await _rewrite_teaching_assessment_query(input_data.history, input_data.new_query)
-        embeddings = ZhipuAIEmbeddings()
-        rag_snippets = perform_rag_search(standalone_query_for_rag, embeddings, CHROMA_PERSIST_DIR)
-        langchain_messages = convert_chat_messages_to_langchain_format(input_data.history, input_data.new_query)
-        
-        final_messages_for_llm = construct_assessment_prompt_with_history(
-            history=langchain_messages[:-1],
-            new_query=langchain_messages[-1].content,
-            rag_snippets=rag_snippets,
-            user_intent=user_intent
-        )
-        
-        generated_content = generate_assessment_with_llm(messages=final_messages_for_llm)
-        if not generated_content:
-            return None, [], None
+        if db_conn and input_data.base_assessment_id:
+            original_assessment = get_assessment_details_by_id(db_conn, input_data.base_assessment_id)
+            if original_assessment:
+                original_title = original_assessment.get('title', '未命名考核')
+                original_assessment_content = original_assessment.get('content', '').strip()
+                original_answers_text = original_assessment.get('answers_text', '').strip()
+                original_subject = original_assessment.get('subject')
 
         final_full_content = None
 
-        # ... (意图处理逻辑保持不变) ...
         if user_intent == "INCREMENTAL_ADD":
-            print("SERVICE: Handling INCREMENTAL_ADD. Appending new content and answers.")
-            
-            # 分割LLM生成的新内容
-            new_parts = generated_content.split(answer_separator, 1)
+            print(f"SERVICE: Handling {user_intent} with a dedicated creation-then-merge flow.")
+            creation_prompt = f"""
+            你是一位出题专家。你的任务是根据一个【核心主题】和用户的【具体要求】，创作出符合要求的【新增题目和答案】。
+            核心主题: **{original_title}**
+            用户的具体要求: **{input_data.new_query}**
+            你的输出【只应包含你新创作的题目和答案】，并使用 "{answer_separator}" 分隔。新题目要包含题型大标题，如“一、选择题”。
+            """
+            generated_new_content = generate_assessment_with_llm(messages=[
+                SystemMessage(content="你是一个只负责内容创作的AI。"),
+                HumanMessage(content=creation_prompt)
+            ])
+            if not generated_new_content or not generated_new_content.strip():
+                raise Exception("LLM failed to generate new content for the ADD request.")
+            final_full_content = f"{original_assessment_content}\n\n{original_answers_text}\n\n{generated_new_content}"
+            # 我们将拼接逻辑简化，让前端或后续步骤处理合并，以确保所有内容都存在
+            new_parts = generated_new_content.split(answer_separator, 1)
             new_questions_part = new_parts[0].strip()
             new_answers_part = new_parts[1].strip() if len(new_parts) > 1 else ""
-
-            # 拼接完整的问题部分
-            full_questions = f"{original_assessment_content}\n\n{new_questions_part}"
-            
-            # 拼接完整的答案部分
-            full_answers = f"{original_answers_text}\n\n{new_answers_part}".strip()
-            
-            # 重新组合成最终的完整内容
-            final_full_content = f"{full_questions}\n\n{answer_separator}\n{full_answers}"
-        
-        elif user_intent in ["REVISION", "DELETION", "REWRITE"]:
-            print(f"SERVICE: Handling {user_intent}. Replacing original content with new version.")
-            # 对于这些意图, LLM应被引导生成完整的新版本，所以直接使用其输出
-            final_full_content = generated_content
-
-        else: # UNKNOWN 或其他未处理的意图
-            print("SERVICE: Intent is UNKNOWN. Defaulting to incremental add behavior (with answer concatenation).")
-            # 同样应用增量添加逻辑作为安全默认值
-            new_parts = generated_content.split(answer_separator, 1)
-            new_questions_part = f"[意图未知，内容已附加]：\n{new_parts[0].strip()}"
-            new_answers_part = new_parts[1].strip() if len(new_parts) > 1 else ""
-
             full_questions = f"{original_assessment_content}\n\n{new_questions_part}"
             full_answers = f"{original_answers_text}\n\n{new_answers_part}".strip()
-            final_full_content = f"{full_questions}\n\n{answer_separator}\n{full_answers}"
+            final_full_content = f"{full_questions}\n\n{answer_separator}\n\n{full_answers}"
 
+        elif user_intent in ["REVISION", "DELETION"]:
+            print(f"SERVICE: Handling {user_intent} with structured output approach.")
+            structured_edit_prompt = f"""
+            你是一个精准的文本编辑指令生成器。你的任务是分析一份【原始试卷】和用户的【修改要求】，然后生成一个描述如何修改的JSON指令。
+            --- 原始试卷 ---
+            {original_assessment_content}
+            ---
+            --- 用户的修改要求 ---
+            {input_data.new_query}
+            ---
+            【你的任务】
+            请生成一个JSON对象，该对象包含两个键：
+            1. `questions_to_delete`: 一个包含【需要被删除的题目编号】的数组。编号必须是 "题目X" 的格式。例如 ["题目6"]。如果不需要删除任何题目，则为空数组 `[]`。
+            2. `questions_to_add`: 一个包含【需要新增的题目】的数组，每个题目是一个包含 "question_text" 和 "model_answer" 的对象。如果不需要新增题目，则为空数组 `[]`。
+            你的输出必须是且只能是一个JSON对象。
+            """
+            edit_instructions = await parse_query_with_llm(structured_edit_prompt)
+            if "error" in edit_instructions:
+                raise Exception(f"LLM failed to generate valid edit instructions: {edit_instructions['error']}")
+            final_full_content = _apply_structured_edits(original_assessment_content, original_answers_text, edit_instructions, answer_separator)
+
+        else: # REWRITE
+            print(f"SERVICE: Handling {user_intent} with direct generation approach.")
+            system_prompt = "你是一位顶级的出题专家，请根据用户指令重写试卷。"
+            human_prompt_parts = [
+                "**【核心任务：重写试卷】**\n请【完全忽略】所有上下文，根据用户最新指令，从零开始生成一份【全新的、完整的】试卷。",
+                f"用户的最新指令是：'{input_data.new_query}'",
+                f"\n【输出格式规范】\n你的输出必须包含 {answer_separator} 分隔的题目和答案部分。"
+            ]
+            human_prompt_content = "\n".join(human_prompt_parts)
+            messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt_content)]
+            final_full_content = generate_assessment_with_llm(messages=messages)
+
+        new_title = await _generate_semantic_title_for_refinement(original_title, input_data.new_query)
         if final_full_content is None:
-            print("SERVICE ERROR: No final content was constructed due to logic error.")
-            return None, [], None
+            raise Exception("Failed to construct final content.")
+        return new_title, final_full_content, [], original_subject
 
-        # ## 修改点3: 返回元组 (完整内容, RAG片段, 原始学科)
-        return final_full_content, rag_snippets, original_subject
-    
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"SERVICE ERROR in refine_assessment_service: {e}")
-        # ## 修改点4: 调整返回以匹配新签名
-        return None, [], None
+        return None, None, [], None
     finally:
         if db_conn and db_conn.is_connected():
             db_conn.close()
 
-    
-
 async def get_student_assessment_performance_service(assessment_id: int) -> List[StudentAssessmentSummary]:
-    """
-    Retrieves and aggregates student performance for a specific assessment, calculating accuracy for each student.
-    """
+
     print(f"SERVICE: Call received for aggregated performance on assessment_id: {assessment_id}")
     
     db_conn = None
@@ -1585,8 +1643,8 @@ async def create_user_by_admin_service(user_data: AdminCreateUserInput) -> Dict[
         if db_conn.is_connected():
             db_conn.close()
 
-async def reset_user_password_service(user_id: int, role: str, password_data: AdminResetPasswordInput):
-    new_hashed_password = get_password_hash(password_data.new_password)
+async def reset_user_password_service(user_id: int, role: str, password: str):
+    new_hashed_password = get_password_hash(password)
     db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1629,7 +1687,7 @@ async def get_teacher_resource_detail_service(resource_type: str, resource_id: i
 
 
 async def list_all_subjects_service() -> List[str]:
-    """获取所有学科列表。"""
+
     db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -1654,30 +1712,40 @@ async def list_resources_by_subject_service(
         if db_conn.is_connected():
             db_conn.close()
 
-async def export_resources_by_subject_service(subject: str, search: Optional[str]) -> str:
+async def export_single_resource_service(resource_type: str, resource_id: int) -> Dict[str, str]:
+    """
+    获取单个资源的内容，并准备用于导出的数据。
+    返回一个包含安全文件名和文件内容的字典。
+    """
     db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection failed.")
+    
     try:
-        data = get_unified_resources_by_subject(db_conn, subject, page=1, page_size=10000, search=search)
-        resources = data.get('resources', [])
+        # 复用获取详情的函数
+        details = get_teacher_resource_detail(db_conn, resource_type,resource_id)
+        if not details:
+            raise HTTPException(status_code=404, detail="Resource not found.")
         
-        if not resources:
-            return ""
-
-        output = io.StringIO()
-        if resources:
-            for res in resources:
-                if 'created_at' in res and isinstance(res['created_at'], datetime):
-                    res['created_at'] = res['created_at'].strftime('%Y-%m-%d %H:%M:%S')
-            
-            writer = csv.DictWriter(output, fieldnames=resources[0].keys())
-            writer.writeheader()
-            writer.writerows(resources)
+        # --- 准备文件名和文件内容 ---
         
-        return output.getvalue()
+        # 清理标题，移除不适合做文件名的字符
+        title = details.get('title', f'resource_{resource_id}')
+        # 移除非法字符，并将空格替换为下划线
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", title).replace(' ', '_')
+        filename = f"{resource_type}_{safe_title}.txt"
+        
+        # 准备文件内容，格式化输出
+        file_content = f"标题: {details.get('title', 'N/A')}\n"
+        file_content += f"学科: {details.get('subject', 'N/A')}\n"
+        file_content += f"资源ID: {details.get('id')}\n"
+        file_content += f"========================================\n\n"
+        file_content += details.get('full_content', '')
+        
+        return {"filename": filename, "content": file_content}
+        
     finally:
-        if db_conn.is_connected():
+        if db_conn and db_conn.is_connected():
             db_conn.close()
 
 async def get_dashboard_usage_service() -> DashboardUsageResponse:
@@ -1802,16 +1870,28 @@ async def get_low_performing_subjects_service() -> List[SubjectPerformance]:
             db_conn.close()
 
 async def get_student_effectiveness_service() -> StudentEffectivenessResponse:
+    db_conn = None
     db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection failed.")
         
     try:
+        # --- 添加的调试日志 ---
+        print("\n--- [SERVICE] START: get_student_effectiveness_service ---")
+        print(f"[SERVICE] 1. Before get_daily_accuracy_trend: Connection is connected? -> {db_conn.is_connected()}")
+
         # 1. 获取正确率趋势
         trend_data = get_daily_accuracy_trend(db_conn)
-        
+
+        print("[SERVICE] 1.1. SKIPPED get_daily_accuracy_trend call.")
+        # --- 添加的调试日志 ---
+        print(f"[SERVICE] 2. After get_daily_accuracy_trend: Connection is connected? -> {db_conn.is_connected()}")
+
         # 2. 获取知识点数据并分析
         attempts_with_concepts = get_all_practice_attempts_with_concepts(db_conn)
+        
+        print("[SERVICE] 3. After get_all_practice_attempts_with_concepts: All DB calls finished.")
+        # --- 调试日志结束 ---
         
         concept_stats = defaultdict(lambda: {'total': 0, 'score': 0.0, 'incorrect': 0})
         
@@ -1862,8 +1942,10 @@ async def get_student_effectiveness_service() -> StudentEffectivenessResponse:
         )
 
     finally:
-        if db_conn.is_connected():
+        if db_conn and db_conn.is_connected():
+            print("[SERVICE] FINALLY: Closing connection.")
             db_conn.close()
+        print("--- [SERVICE] END: get_student_effectiveness_service ---\n")
 
 async def get_teacher_published_assessments_service(teacher_id: int) -> List[PublishedAssessmentInfo]:
     db_conn = None
@@ -1889,18 +1971,15 @@ async def analyze_assessment_performance_service(assessment_id: int) -> Assessme
         if not db_conn:
             raise HTTPException(status_code=500, detail="Database connection failed.")
 
-        # 1. 数据聚合 (Data Aggregation) - 调用你已有的函数
         stats_raw = get_assessment_question_stats(db_conn, assessment_id)
         if not stats_raw:
             raise HTTPException(status_code=404, detail="No student answer data found for this assessment.")
 
-        # 2. 获取考核的原始题目和标题 (Get Context)
         assessment_data = get_assessment_content_by_id(db_conn, assessment_id)
         if not assessment_data:
             raise HTTPException(status_code=404, detail=f"Assessment with ID {assessment_id} not found.")
         
         assessment_title = assessment_data.get('title', 'Untitled Assessment')
-        # 从重构的 content 中分离出 questions_text
         questions_text = assessment_data.get('content', '').split('---参考答案与解析---')[0].strip()
 
         # 3. 构造给LLM的提示 (Prompt Engineering)
@@ -1972,3 +2051,165 @@ async def analyze_assessment_performance_service(assessment_id: int) -> Assessme
         if db_conn and db_conn.is_connected():
             db_conn.close()
 
+
+async def analyze_assessment_performance(assessment_id: int) -> AssessmentAnalysisOutput:
+    db_conn = None
+    try:
+        db_conn = get_mysql_connection(db_name=os.environ.get("MYSQL_DB"))
+        if not db_conn:
+            raise HTTPException(status_code=500, detail="Database connection failed.")
+
+        # --- 1. 数据聚合 (Data Aggregation) ---
+        stats_raw = get_assessment_question_stats(db_conn, assessment_id)
+        if not stats_raw:
+            raise HTTPException(status_code=404, detail="该考核尚无学生作答数据，无法进行分析。")
+
+        # --- 2. 获取上下文 (Get Context) ---
+        assessment_data = get_assessment_content_by_id(db_conn, assessment_id)
+        if not assessment_data:
+            raise HTTPException(status_code=404, detail=f"ID为 {assessment_id} 的考核未找到。")
+        
+        assessment_title = assessment_data.get('title', '未命名考核')
+        # 从 'content' 中分离出纯题目部分
+        questions_text = assessment_data.get('content', '').split('---参考答案与解析---')[0].strip()
+
+        # --- 3. 构造 Prompt (Prompt Engineering) ---
+        analysis_prompt = f"""
+        你是一位顶级的教育数据分析专家和教学顾问。你的任务是深入分析一份在线考核的学情统计数据，并为任课教师生成一份全面、深刻且极具操作性的学情分析报告。
+
+        **【输入信息】**
+
+        1.  **考核基本信息:**
+            - 考核标题: "{assessment_title}"
+
+        2.  **考核的全部题目:**
+            ---
+            {questions_text}
+            ---
+
+        3.  **各题作答情况的统计数据 (JSON格式):**
+            ---
+            {json.dumps(stats_raw, indent=2, ensure_ascii=False)}
+            ---
+
+        **【你的核心任务】**
+        请基于以上所有信息，生成一份结构化的学情分析报告。你的输出必须是且只能是一个符合下面描述的、格式严谨的JSON对象。
+
+        **【必需的输出JSON结构】**
+        ```json
+        {{
+          "assessment_title": "{assessment_title}",
+          "overall_summary": "（这里是对班级整体表现的高度概括性总结，必须简明扼要，点出核心问题。例如：本次考核显示，学生对基础概念掌握较为扎实，但在综合应用和解决复杂问题方面能力不足。）",
+          "strength_points": [
+            "（根据数据和题目，提炼出学生普遍掌握得最好的1-3个知识点或技能）",
+            "（例如：学生对'Python基础语法'的记忆性知识掌握牢固）"
+          ],
+          "weakness_points": [
+            "（根据数据和题目，提炼出学生普遍存在的、最关键的1-3个薄弱知识点或技能）",
+            "（例如：学生在'递归思想的理解与应用'上存在普遍困难）"
+          ],
+          "problematic_questions": [
+            {{
+              "question_identifier": "（选择错误率最高或最能反映问题的题号，如 '题目3'）",
+              "question_text": "（从上面提供的题目中，复制该题的完整题干）",
+              "correct_rate": "（根据统计数据，计算并填入该题的正确率【纯数字，不要带百分号%】，例如 55.5）",
+              "main_knowledge_point": "（精炼概括这道题考察的核心知识点或能力，例如：'链表的逆序操作'）",
+              "common_error_analysis": "（深入分析学生为什么会在这道题上出错，是概念混淆、计算失误，还是审题不清？给出具体推测。）"
+            }}
+            // ... (为其他1-2个最值得关注的问题，生成同样结构的对象) ...
+          ],
+          "teaching_suggestions": [
+            "（第一条教学建议：必须非常具体、可操作。例如：'建议在下节课用15分钟时间，通过画图和实例，重新讲解递归的执行过程，特别是回溯阶段。'）",
+            "（第二条教学建议：例如：'可以设计一个关于链表操作的专项练习，包含头插法、尾插法和逆序，帮助学生巩固。'）",
+            "（第三条教学建议：例如：'鼓励学生在编程题中多写注释，解释自己的思路，有助于暴露其思维误区。'）"
+          ]
+        }}
+        ```
+        **分析要求:**
+        - **深刻洞察**: 不要只做表面描述，要深入分析数据背后的原因。
+        - **聚焦重点**: `problematic_questions` 只需选择最关键的2-3个进行分析。
+        - ** actionable**: `teaching_suggestions` 必须是老师看完就能直接用的具体方法，而不是空泛的口号。
+
+        现在，请开始生成你的专业JSON分析报告。
+        """
+
+        # --- 4. 调用 LLM 并返回 ---
+        parsed_analysis = await parse_query_with_llm(analysis_prompt)
+        
+        if "error" in parsed_analysis or not parsed_analysis.get("problematic_questions"):
+            print(f"LLM parsing failed. Raw response: {parsed_analysis}")
+            raise HTTPException(status_code=500, detail="AI模型未能生成有效的分析报告。")
+        if 'problematic_questions' in parsed_analysis and isinstance(parsed_analysis['problematic_questions'], list):
+            for question_data in parsed_analysis['problematic_questions']:
+               if 'correct_rate' in question_data:
+                    rate_val = question_data['correct_rate']
+                    try:
+                        # 如果是字符串, 移除 '%' 并转换为 float
+                        if isinstance(rate_val, str):
+                           cleaned_rate = float(rate_val.strip().replace('%', ''))
+                        # 如果已经是数字, 确保是 float
+                        else:
+                            cleaned_rate = float(rate_val)
+                        question_data['correct_rate'] = cleaned_rate
+                    except (ValueError, TypeError):
+                        # 如果转换失败, 打印警告并设置为默认值 0.0
+                        print(f"Warning: Could not parse correct_rate '{rate_val}'. Defaulting to 0.0.")
+                        question_data['correct_rate'] = 0.0
+        return AssessmentAnalysis(**parsed_analysis)
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"分析过程中发生内部错误: {str(e)}")
+    finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.close()
+
+
+async def _generate_semantic_title_for_refinement(original_title: str, user_query: str) -> str:
+    """
+    使用LLM根据原始标题和用户追问，生成一个描述性的新标题。
+    """
+    print(f"SERVICE: Generating semantic title. Original: '{original_title}', Query: '{user_query}'")
+    
+    title_generation_prompt = ChatPromptTemplate.from_template(
+        """
+        你是一位精通文件命名的专家。你的任务是根据一个【原始标题】和用户的【修改指令】，生成一个简洁、清晰、描述性的【新标题】。
+
+        规则：
+        1. 新标题必须保留【原始标题】的核心内容。
+        2. 新标题应该简要地概括用户的【修改指令】。
+        3. 新标题应该看起来专业，避免使用 "Refined", "ID" 等技术词汇。
+        4. 新标题末尾可以加上一个版本标识，如 "(修订版)" 或 "(补充版)"。
+        5. 你的回答【只能包含最终的标题字符串】，不要有任何额外的解释或引号。
+
+        ---
+        【示例 1】
+        原始标题: "Python入门教案"
+        修改指令: "再加两道编程练习题"
+        你的输出: Python入门教案 - 补充编程练习
+
+        【示例 2】
+        原始标题: "一战历史考核"
+        修改指令: "把选择题的难度提高一些"
+        你的输出: 一战历史考核 (难度提升版)
+        ---
+
+        现在，请为以下输入生成新标题：
+        原始标题: "{original_title}"
+        修改指令: "{user_query}"
+        """
+    )
+    
+    try:
+        # 使用一个快速、低成本的模型
+        llm = ChatZhipuAI(model="glm-4", temperature=0.1)
+        chain = title_generation_prompt | llm | StrOutputParser()
+        new_title = await chain.ainvoke({"original_title": original_title, "user_query": user_query})
+        return new_title.strip().replace('"', '') # 清理可能的引号
+    except Exception as e:
+        print(f"SERVICE WARNING: Failed to generate semantic title: {e}. Falling back to default.")
+        # 如果LLM失败，提供一个仍然比之前好的后备标题
+        return f"{original_title} (修订版 - {datetime.now().strftime('%H%M')})"

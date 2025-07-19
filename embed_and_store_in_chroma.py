@@ -6,9 +6,8 @@ from langchain_community.embeddings import ZhipuAIEmbeddings
 from langchain_community.vectorstores import Chroma
 
 # --- Configuration ---
-DOC_DIRECTORY = 'D:\《嵌入式Linux开发实践教程》示例资源-word版课件'
+DOC_DIRECTORY = 'D:\教材资源'
 CHROMA_PERSIST_DIR = 'chroma_db_zhipu'
-# Ensure ZHIPUAI_API_KEY environment variable is set if required by ZhipuAIEmbeddings.
 
 def main():
     all_documents = []
@@ -21,7 +20,7 @@ def main():
         loader_cls=Docx2txtLoader,
         show_progress=True,
         use_multithreading=True,
-        silent_errors=True # 忽略加载单个文件时发生的错误
+        silent_errors=True 
     )
     try:
         docx_documents = docx_loader.load()
@@ -36,10 +35,10 @@ def main():
     pdf_loader = DirectoryLoader(
         DOC_DIRECTORY,
         glob="**/*.pdf",  # 使用 **/* 来递归搜索子目录中的 .pdf 文件
-        loader_cls=PyMuPDFLoader, # PyPDFLoader 会逐页加载PDF
+        loader_cls=PyMuPDFLoader, 
         show_progress=True,
-        use_multithreading=True, # 对PyPDFLoader可能效果有限，但可以保留
-        silent_errors=True # 忽略加载单个文件时发生的错误
+        use_multithreading=True, 
+        silent_errors=True 
     )
     try:
         pdf_documents = pdf_loader.load()
@@ -70,10 +69,8 @@ def main():
         remaining_chunks = chunks[batch_size:]
         for i in range(0, len(remaining_chunks), batch_size):
                 current_batch = remaining_chunks[i:i + batch_size]
-                    # Ensure you are adding to the same vector_store instance
                 ids = vector_store.add_documents(documents=current_batch) 
                    
             
-            # vector_store.persist() # Generally not needed if persist_directory is set from the start
 if __name__ == "__main__":
     main()
