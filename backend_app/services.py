@@ -603,13 +603,13 @@ async def process_student_question_service(input_data: StudentQuestionInput) -> 
 
 async def generate_initial_teaching_plan_service(
 
-    initial_outline: str, 
+    initial_outline: str,
     style_tone:str,
     output_structure:str
-) -> tuple[str , List[str] ]: 
-    zhipuai_api_key = _get_zhipuai_api_key() 
+) -> tuple[str , List[str] ]:
+    zhipuai_api_key = _get_zhipuai_api_key()
     if not style_tone or not style_tone.strip():
-        final_style_tone = "清晰、专业且易于理解" 
+        final_style_tone = "清晰、专业且易于理解"
         print(f"SERVICE INFO: 'style_tone' was empty, using default: '{final_style_tone}'")
     else:
         final_style_tone = style_tone
@@ -621,20 +621,13 @@ async def generate_initial_teaching_plan_service(
     retrieved_rag_snippets = []
     try:
         print(f"SERVICE: Performing RAG search for query: '{initial_outline[:100]}...'")
-        if not os.path.exists(CHROMA_PERSIST_DIR):
-            print(f"SERVICE WARNING: Chroma DB directory '{CHROMA_PERSIST_DIR}' not found. Proceeding without RAG context.")
-        else:
-            embeddings_for_rag = ZhipuAIEmbeddings() 
-            vector_store = Chroma(
-                persist_directory=CHROMA_PERSIST_DIR,
-                embedding_function=embeddings_for_rag
-            )
-            rag_docs = vector_store.similarity_search(initial_outline, k=10)
-            if rag_docs:
-                retrieved_rag_snippets = [doc.page_content for doc in rag_docs]
-                print(f"SERVICE: Retrieved {len(retrieved_rag_snippets)} snippets from RAG.")
-            else:
-                print("SERVICE: No relevant snippets found from RAG.")
+        embeddings = ZhipuAIEmbeddings()
+        retrieved_rag_snippets = perform_rag_search(
+            keywords_list=[initial_outline],
+            embeddings_model_instance=embeddings,
+            vector_store_dir=CHROMA_PERSIST_DIR,
+            top_k=10
+        )
     except Exception as e:
         print(f"SERVICE ERROR during RAG search: {e}. Proceeding without RAG context.")
 
@@ -713,13 +706,21 @@ async def generate_assessment_service(
     
     retrieved_rag_snippets = []
     generated_assessment_content = None
-
     try:
+        # 在调用construct_assessment_prompt之前，先执行RAG搜索
+        print(f"SERVICE: Performing RAG search for assessment content: '{input_data.teaching_plan_content[:100]}...'")
+        embeddings = ZhipuAIEmbeddings()
+        retrieved_rag_snippets = perform_rag_search(
+            keywords_list=[input_data.teaching_plan_content],
+            embeddings_model_instance=embeddings,
+            vector_store_dir=CHROMA_PERSIST_DIR,
+            top_k=5  # 为试卷生成获取更精确的5个片段
+        )
         assessment_prompt_components = construct_assessment_prompt(
             teaching_plan_content=input_data.teaching_plan_content,
             retrieved_rag_snippets=retrieved_rag_snippets,
             question_preferences=final_question_prefs,
-            subject=input_data.subject 
+            subject=input_data.subject
         )
         
 
@@ -1127,7 +1128,7 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
     original_plan_content = ""
     original_title = "未命名教案"
     MYSQL_DB_NAME = os.environ.get("MYSQL_DB")
-    zhipuai_api_key = _get_zhipuai_api_key() 
+    zhipuai_api_key = _get_zhipuai_api_key()
 
     try:
         db_conn = get_mysql_connection(db_name=MYSQL_DB_NAME)
@@ -1138,10 +1139,18 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
                 original_plan_content = original_plan.get('content', '').strip()
 
         final_full_content = None
-
+        # Perform RAG search based on the refinement query
+        print(f"SERVICE: Performing RAG search for teaching plan refinement: '{input_data.new_query[:100]}...'")
+        embeddings = ZhipuAIEmbeddings()
+        rag_snippets = perform_rag_search(
+            keywords_list=[input_data.new_query],
+            embeddings_model_instance=embeddings,
+            vector_store_dir=CHROMA_PERSIST_DIR,
+            top_k=5  # Get 5 focused snippets for refinement
+        )
         if user_intent == "INCREMENTAL_ADD":
             print(f"SERVICE: Handling {user_intent} for teaching plan with dedicated creation-then-append flow.")
-            
+
             # 1. LLM 创作新内容
             creation_prompt = f"""
             你是一位教案设计专家。你的任务是根据一个【核心主题】和用户的【补充要求】，创作出【新增的教案章节】。
@@ -1166,7 +1175,7 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
 
         else: # REVISION, DELETION, REWRITE 走一个统一的、更强大的直接生成流程
             print(f"SERVICE: Handling {user_intent} for teaching plan with direct full-regeneration flow.")
-            
+
             system_prompt = "你是一位经验丰富的教师和教案设计专家。你的任务是根据提供的原始教案和用户的修改指令，生成一份修改后的、全新的、完整的教案。"
             human_prompt_parts = [
                 f"--- 原始教案 (供你参考和修改) ---\n{original_plan_content}\n--- 原始教案结束 ---",
@@ -1180,10 +1189,10 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
                 human_prompt_parts.append(
                     "**【核心任务：重写教案】**\n请【完全忽略】上述原始教案，根据用户最新指令，从零开始创作一份【全新的、完整的】教案。"
                 )
-            
+
             human_prompt_parts.append(f"用户的最新指令是：'{input_data.new_query}'")
             human_prompt_content = "\n\n".join(human_prompt_parts)
-            
+
             llm_for_plan = ChatZhipuAI(model="glm-4", temperature=0.7, api_key=zhipuai_api_key)
             ai_message = await llm_for_plan.ainvoke([
                 SystemMessage(content=system_prompt),
@@ -1195,9 +1204,9 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
         new_title = await _generate_semantic_title_for_refinement(original_title, input_data.new_query)
         if final_full_content is None:
             raise Exception("Failed to construct final content.")
-        
+
         # RAG 部分在追问中可以简化或移除，这里返回空列表
-        return new_title, final_full_content, []
+        return new_title, final_full_content, rag_snippets
 
     except Exception as e:
         import traceback
@@ -1289,7 +1298,15 @@ async def refine_assessment_service(input_data: RefineAssessmentInput) -> tuple[
                 original_subject = original_assessment.get('subject')
 
         final_full_content = None
-
+        # RAG Search based on the new query
+        print(f"SERVICE: Performing RAG search for assessment refinement: '{input_data.new_query[:100]}...'")
+        embeddings = ZhipuAIEmbeddings()
+        rag_snippets = perform_rag_search(
+            keywords_list=[input_data.new_query],
+            embeddings_model_instance=embeddings,
+            vector_store_dir=CHROMA_PERSIST_DIR,
+            top_k=5
+        )
         if user_intent == "INCREMENTAL_ADD":
             print(f"SERVICE: Handling {user_intent} with a dedicated creation-then-merge flow.")
             creation_prompt = f"""
