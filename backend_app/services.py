@@ -1191,6 +1191,9 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
                 )
 
             human_prompt_parts.append(f"用户的最新指令是：'{input_data.new_query}'")
+            if rag_snippets:
+                rag_context_str = "\n".join([f"- {snippet}" for snippet in rag_snippets])
+                human_prompt_parts.append(f"\n--- 补充参考材料 ---\n{rag_context_str}")
             human_prompt_content = "\n\n".join(human_prompt_parts)
 
             llm_for_plan = ChatZhipuAI(model="glm-4", temperature=0.7, api_key=zhipuai_api_key)
@@ -1205,7 +1208,6 @@ async def refine_teaching_plan_service(input_data: RefineTeachingPlanInput) -> t
         if final_full_content is None:
             raise Exception("Failed to construct final content.")
 
-        # RAG 部分在追问中可以简化或移除，这里返回空列表
         return new_title, final_full_content, rag_snippets
 
     except Exception as e:
@@ -1313,6 +1315,7 @@ async def refine_assessment_service(input_data: RefineAssessmentInput) -> tuple[
             你是一位出题专家。你的任务是根据一个【核心主题】和用户的【具体要求】，创作出符合要求的【新增题目和答案】。
             核心主题: **{original_title}**
             用户的具体要求: **{input_data.new_query}**
+            补充知识: **{rag_snippets}**
             你的输出【只应包含你新创作的题目和答案】，并使用 "{answer_separator}" 分隔。新题目要包含题型大标题，如“一、选择题”。
             """
             generated_new_content = generate_assessment_with_llm(messages=[
@@ -1340,6 +1343,9 @@ async def refine_assessment_service(input_data: RefineAssessmentInput) -> tuple[
             --- 用户的修改要求 ---
             {input_data.new_query}
             ---
+            --- 补充知识 ---
+            {rag_snippets}
+            ---
             【你的任务】
             请生成一个JSON对象，该对象包含两个键：
             1. `questions_to_delete`: 一个包含【需要被删除的题目编号】的数组。编号必须是 "题目X" 的格式。例如 ["题目6"]。如果不需要删除任何题目，则为空数组 `[]`。
@@ -1357,6 +1363,7 @@ async def refine_assessment_service(input_data: RefineAssessmentInput) -> tuple[
             human_prompt_parts = [
                 "**【核心任务：重写试卷】**\n请【完全忽略】所有上下文，根据用户最新指令，从零开始生成一份【全新的、完整的】试卷。",
                 f"用户的最新指令是：'{input_data.new_query}'",
+                f"补充知识: {rag_snippets}",
                 f"\n【输出格式规范】\n你的输出必须包含 {answer_separator} 分隔的题目和答案部分。"
             ]
             human_prompt_content = "\n".join(human_prompt_parts)
